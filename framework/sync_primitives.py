@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Self
+from typing import TypeAlias
 
 from framework.contention import DOMAINS, ContentionVector
 
@@ -349,6 +350,8 @@ class GuardBusyWaitIrqSavePreemption(BusyWaitIrqSavePreemption):
         traceback: TracebackType | None,
     ) -> None:
         self.unlock(self.cv, self._flags)
+
+GuardSpinLock: TypeAlias = GuardBusyWaitIrqSavePreemption
 
 
 class LocalMultiTasks(SyncPrimitive):

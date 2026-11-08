@@ -23,3 +23,7 @@ class Console(System):
 
     def _write(self, env: TaskLocalEnv):
         pass
+
+    def _sync_putc(self, env: TaskLocalEnv):
+        self.drive(env, "uart", "putc_sync")
+        pass
