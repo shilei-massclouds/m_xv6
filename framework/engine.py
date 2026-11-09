@@ -42,6 +42,16 @@ def _emit(env: TaskLocalEnv, queue: deque[Signal], target: System, action: str, 
     queue.append(Signal(target, action, args, env, queue))
 
 
+def _get_target_ref(path: str) -> System:
+    from global_vars import gv
+    parent = gv
+    for name in path.split("."):
+        ret = getattr(parent, name)
+        parent = ret
+
+    return ret
+
+
 @dataclass
 class Signal:
     target: str
@@ -51,8 +61,7 @@ class Signal:
     queue: deque[Signal] = field(repr=False)
 
     def handle(self) -> Any:
-        from global_vars import gv
-        system = getattr(gv, self.target)
+        system = _get_target_ref(self.target)
         action = getattr(system, self.action)
         system.acquire(self.env, self.action)
         try:
@@ -110,11 +119,6 @@ class System:
         finally:
             env.signal_queues.pop()
             env.depth = depth
-
-    def drive_all(
-        self, env: TaskLocalEnv, targets: Iterable[System], action: str, **kwargs
-    ) -> list[Any]:
-        return [self.drive(env, target, action, **kwargs) for target in targets]
 
     def emit(self, env: TaskLocalEnv, target: str, action: str, **kwargs):
         _emit(env, env.signal_queues[-1], target, action, **kwargs)

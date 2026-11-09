@@ -11,3 +11,4 @@ class BpInitFlow(System):
         self.drive(env, "io", "_init")
         self.drive(env, "io", "printk")
         self.drive(env, "page_allocator", "_free_range")
+        self.drive(env, "kernel_page_table", "_init")

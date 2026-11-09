@@ -20,3 +20,11 @@ class PageAllocator(System):
 
     def _kfree(self, env: TaskLocalEnv):
         pass
+
+    def _kalloc(self, env: TaskLocalEnv):
+        return Page()
+
+
+@dataclass
+class Page(System):
+    pass
