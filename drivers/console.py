@@ -26,4 +26,3 @@ class Console(System):
 
     def _sync_putc(self, env: TaskLocalEnv):
         self.drive(env, "uart", "putc_sync")
-        pass

@@ -9,4 +9,5 @@ class BpInitFlow(System):
     def start(self, env: TaskLocalEnv, **kwargs):
         self.drive(env, "console", "_init")
         self.drive(env, "io", "_init")
-        self.drive(env, "io", "printk", msg="xv6 kernel is booting\n")
+        self.drive(env, "io", "printk")
+        self.drive(env, "page_allocator", "_free_range")
