@@ -14,6 +14,10 @@ class Proc(System):
         self.drive(env, "page_allocator", "_kalloc")
         self.drive(env, "kernel_page_table", "_kvmmap")
 
+    def _init(self, env: TaskLocalEnv):
+        # Todo: makesure that `_mapstack` has been called.
+        pass
+
 
 @dataclass
 class ProcTable(System):
@@ -21,3 +25,9 @@ class ProcTable(System):
 
     def _mapstacks(self, env: TaskLocalEnv):
         self.drive(env, "proc_table.element", "_mapstack")
+
+    def _init(self, env: TaskLocalEnv):
+        self.drive(env, "proc_table.element", "_init")
+
+    def _schedule(self, env: TaskLocalEnv):
+        pass
