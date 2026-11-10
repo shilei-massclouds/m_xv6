@@ -8,6 +8,7 @@ from kernel.io import IO
 from kernel.page_allocator import PageAllocator
 from kernel.vm import KernelPageTable, VM
 from kernel.proc import ProcTable, Proc
+from kernel.proc import PidGen
 from kernel.current import CurrentHart
 from kernel.trap import Trap
 from drivers.uart import Uart
@@ -38,6 +39,8 @@ class GlobalVars:
     ftable: FileTable = field(default_factory=FileTable)
     vdisk: VirtIODisk = field(default_factory=VirtIODisk)
     initproc: Proc = field(default_factory=Proc)
+    childproc: Proc = field(default_factory=Proc)
+    pidgen: PidGen = field(default_factory=PidGen)
 
     def reset(self):
         self.__init__()
