@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 import sys
 from collections import deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from copy import copy
 from dataclasses import dataclass, field
 from os import getenv
@@ -16,7 +18,7 @@ from framework.contention import (
 )
 
 if TYPE_CHECKING:
-    from kernel.task import Task
+    from kernel.proc import Proc
 
 _VISIBILITY_ATTR = "__visibility__"
 _PROTECTED_BY_ATTR = "__protected_by__"
@@ -31,12 +33,12 @@ def env_enabled(name: str) -> bool:
 @dataclass
 class TaskLocalEnv:
     cv: ContentionVector = field(default_factory=ContentionVector.zeros)
-    task: Task | None = field(default=None, repr=False)
+    task: Proc | None = field(default=None, repr=False)
     depth: int = 0
     signal_queues: list[deque[Signal]] = field(default_factory=list, repr=False)
 
 
-def _emit(env: TaskLocalEnv, queue: deque[Signal], target: System, action: str, **args):
+def _emit(env: TaskLocalEnv, queue: deque[Signal], target: str, action: str, **args):
     indent = "    " * env.depth
     print(f"{indent}{action} -> {target}")
     queue.append(Signal(target, action, args, env, queue))
@@ -44,12 +46,12 @@ def _emit(env: TaskLocalEnv, queue: deque[Signal], target: System, action: str, 
 
 def _get_target_ref(path: str) -> System:
     from global_vars import gv
-    parent = gv
-    for name in path.split("."):
-        ret = getattr(parent, name)
-        parent = ret
 
-    return ret
+    target: Any = gv
+    for name in path.split("."):
+        target = getattr(target, name)
+
+    return target
 
 
 @dataclass

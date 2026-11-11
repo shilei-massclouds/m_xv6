@@ -2,23 +2,21 @@
 
 from dataclasses import dataclass, field
 
-from flows.bp_init_flow import BpInitFlow
 from drivers.console import Console
-from kernel.io import IO
-from kernel.page_allocator import PageAllocator
-from kernel.vm import KernelPageTable, VM
-from kernel.proc import ProcTable, Proc
-from kernel.proc import PidGen
-from kernel.proc import Scheduler
-from kernel.current import CurrentHart
-from kernel.trap import Trap
-from drivers.uart import Uart
 from drivers.devsw import DevSW
 from drivers.plic import Plic
+from drivers.uart import Uart
 from drivers.virtio_disk import VirtIODisk
+from flows.bp_init_flow import BpInitFlow
 from fs.buffer import BufferCache
-from fs.inode import InodeTable
 from fs.file import FileTable
+from fs.inode import InodeTable
+from kernel.current import CurrentHart
+from kernel.io import IO
+from kernel.page_allocator import PageAllocator
+from kernel.proc import PidGen, Proc, ProcTable, Scheduler
+from kernel.trap import Trap
+from kernel.vm import VM, KernelPageTable
 
 
 @dataclass

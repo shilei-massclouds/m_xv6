@@ -1,9 +1,8 @@
 """Console Device"""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from framework.engine import System
-from structs.array import Array
+from framework.engine import System, TaskLocalEnv
 
 
 @dataclass

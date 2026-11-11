@@ -1,5 +1,7 @@
 """Contention vectors and presets for environments and target visibility."""
 
+from __future__ import annotations
+
 from typing import Self
 
 DOMAINS = ("local_irq", "local_tasks", "remote_irq", "remote_tasks")

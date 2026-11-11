@@ -3,14 +3,13 @@
 from dataclasses import dataclass, field
 from enum import Enum
 
-from framework.engine import System
-from structs.array import Array
-from framework.sync_primitives import GuardBusyWaitIrqSavePreemption
-from framework.sync_primitives import GuardSpinLock
+from framework.contention import CPUSCOPE_CV
+from framework.engine import System, TaskLocalEnv, visibility
+from framework.sync_primitives import (
+    GuardSpinLock,
+    LocalIrq,
+)
 from kernel.page_allocator import Page
-from framework.sync_primitives import LocalIrq
-from framework.contention import CPUSCOPE_CV, TASKSCOPE_CV
-from framework.engine import visibility
 
 
 class ProcState(Enum):
@@ -43,8 +42,10 @@ class Proc(System):
 
     def _init(self, env: TaskLocalEnv):
         # Todo: check that `_mapstack` has been called.
+        assert self.state == ProcState.UNUSED, (
+            "process must be unused before initialization"
+        )
         self.pid = self.drive(env, "pidgen", "_alloc")
-        assert(self.state, ProcState.UNUSED)
         self.state = ProcState.USED
         self.trapframe = self.drive(env, "page_allocator", "_kalloc")
         self.pagetable = self.drive(env, "page_allocator", "_kalloc")

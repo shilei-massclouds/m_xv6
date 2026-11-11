@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 
-from framework.engine import System
+from framework.engine import System, TaskLocalEnv
 from structs.array import Array
 
 
@@ -15,8 +15,9 @@ class Console(System):
 
     def _init(self, env: TaskLocalEnv):
         self.drive(env, "uart", "_init")
-        self.drive(env, "devsw", "_register",
-            dev="CONSOLE", read=self._read, write=self._write)
+        self.drive(
+            env, "devsw", "_register", dev="CONSOLE", read=self._read, write=self._write
+        )
 
     def _read(self, env: TaskLocalEnv):
         pass
