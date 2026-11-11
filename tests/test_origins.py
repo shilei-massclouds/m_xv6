@@ -47,7 +47,8 @@ def repository(tmp_path: Path) -> Path:
             "__pycache__",
             ".pytest_cache",
             ".ruff_cache",
-            "snapshots",
+            "*.snap",
+            ".*.tmp",
         ),
     )
     return destination
@@ -146,23 +147,19 @@ def test_bp_snapshot_is_recorded_before_competitors_even_when_start_fails(
 
 
 @pytest.mark.parametrize("origin_type", [BpInitOrigin, ApInitOrigin])
-def test_every_start_creates_a_new_local_environment(
-    model: Any, origin_type: Any
-) -> None:
-    BpInitOrigin().start()
-    origin = origin_type()
-    origin.start()
-    previous_env = origin.env
-    previous_env.depth = 42
-    previous_env.cv.local_irq = 9
-    previous_env.cv.remote_tasks = 99
+def test_origin_instances_have_independent_local_environments(origin_type: Any) -> None:
+    first = origin_type()
+    second = origin_type()
+    assert first.env is not second.env
+    assert first.env.cv is not second.env.cv
+    assert first.env.signal_queues is not second.env.signal_queues
 
-    origin.start()
+    first.env.depth = 42
+    first.env.cv.remote_tasks = 99
 
-    assert origin.env is not previous_env
-    assert _levels(origin.env) == (0, 0, 1, 1)
-    assert origin.env.depth == 0
-    assert origin.env.signal_queues == []
+    assert second.env.depth == 0
+    assert _levels(second.env) == (0, 0, 0, 0)
+    assert second.env.signal_queues == []
 
 
 def test_ap_restores_bp_state_without_running_bp_or_subsystems(
@@ -181,7 +178,7 @@ def test_ap_restores_bp_state_without_running_bp_or_subsystems(
     monkeypatch.setattr(BpInitFlow, "start", no_bp)
     capsys.readouterr()
     ap = ApInitOrigin()
-    assert _levels(ap.env) == (0, 0, 1, 1)
+    assert _levels(ap.env) == (0, 0, 0, 0)
     ap.start()
 
     assert model.initproc.state is ProcState.RUNNABLE
@@ -202,7 +199,6 @@ def test_ap_restores_bp_state_without_running_bp_or_subsystems(
 def test_ap_does_not_adopt_an_environment_reachable_from_the_snapshot(
     model: Any,
 ) -> None:
-    snapshot_paths.SNAPSHOT_DIR.mkdir()
     source: Any = GlobalVars()
     source.initproc.state = ProcState.RUNNABLE
     source.bp_environment = TaskLocalEnv(depth=7)
@@ -229,7 +225,6 @@ def test_ap_rejects_bad_existing_files_without_overwriting_or_changing_globals(
 ) -> None:
     path = snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH
     checkpoint = snapshot_paths.BP_INITIALIZED_CHECKPOINT
-    path.parent.mkdir()
     source = GlobalVars()
     if failure == "corrupt":
         path.write_bytes(b"broken snapshot")
@@ -263,7 +258,7 @@ def test_ap_missing_checkpoint_does_not_create_files_or_run_bp(
         ApInitOrigin().start()
 
     assert vars(model) is current_state
-    assert not snapshot_paths.SNAPSHOT_DIR.exists()
+    assert list(snapshot_paths.SNAPSHOT_DIR.iterdir()) == []
 
 
 @pytest.mark.parametrize("args", [(), ("bp_init_origin",)])
@@ -334,8 +329,10 @@ def inspect_ap(self, env, **kwargs):
     assert gv.initproc.state is ProcState.RUNNABLE
     assert gv.childproc.state is ProcState.UNUSED
     assert (env.cv.local_irq, env.cv.local_tasks,
-            env.cv.remote_irq, env.cv.remote_tasks) == (0, 0, 1, 1)
+            env.cv.remote_irq, env.cv.remote_tasks) == (0, 0, 0, 0)
     original_start(self, env, **kwargs)
+    assert (env.cv.local_irq, env.cv.local_tasks,
+            env.cv.remote_irq, env.cv.remote_tasks) == (0, 0, 1, 1)
     print('AP state verified')
 
 BpInitFlow.start = no_bp
@@ -366,7 +363,7 @@ def test_cli_rejects_unknown_origins_and_extra_arguments(
     assert "bp_init_origin" in result.stderr
     assert "ap_init_origin" in result.stderr
     assert result.stdout == ""
-    assert not (repository / "snapshots").exists()
+    assert {path.name for path in (repository / "snapshots").iterdir()} == {"README.md"}
 
 
 def test_cli_ap_reports_missing_checkpoint_without_running_bp(repository: Path) -> None:
@@ -377,4 +374,4 @@ def test_cli_ap_reports_missing_checkpoint_without_running_bp(repository: Path) 
     assert "bp_initialized.snap" in result.stderr
     assert "Traceback" not in result.stderr
     assert result.stdout == ""
-    assert not (repository / "snapshots").exists()
+    assert {path.name for path in (repository / "snapshots").iterdir()} == {"README.md"}
