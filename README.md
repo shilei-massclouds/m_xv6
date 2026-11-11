@@ -47,6 +47,27 @@ assert saved == loaded
 
 Pickle 加载会执行代码，只加载可信来源的快照。动态属性也需支持 Pickle；局部函数、lambda、打开的文件等不受支持，保存时会明确报错。
 
+方法契约通过 `framework/contracts.py` 中的 `requires(condition)` 和 `ensures(condition)` 显式检查：
+
+```python
+from framework.contracts import ensures, requires
+
+
+def increase(self, amount):
+    requires(amount > 0)
+    previous = self.value
+    self.value += amount
+    ensures(lambda: self.value > previous)
+```
+
+参数接受布尔值，或返回布尔值的无参 callable，包括 lambda、普通函数和绑定方法。普通布尔表达式在调用前求值，callable 在检查时调用一次；需要参数时可用 lambda 包起来。非布尔值或 callable 返回非布尔值会抛出 `TypeError`；条件执行自身抛出的异常直接向上传播。
+
+条件为 `False` 时立即抛出 `ContractViolation`，未捕获时程序终止。错误消息报告调用处的文件、行号、所在函数/方法和 `requires`/`ensures` 阶段，也可以通过异常的 `filename`、`lineno`、`function`、`phase` 属性读取。每条条件单独调用，第一条失败后停止，`python -O` 下仍然检查。
+
+调用者在方法入口和正常出口放置检查；框架不自动包装方法，也不自动复制入口状态。BP/AP 的 `start` 已接入：BP 检查 bootstrap hart 和初始进程状态，AP 检查 hart 1 和 BP 初始化后的进程状态；两者入口 CV 为全零，正常出口检查进程状态和 `(0,0,1,1)` CV。
+
+契约检查与快照相互独立，不隐式保存、加载或回滚状态。BP 已记录的初始化快照描述记录时刻的状态，之后的出口检查失败不会撤销或改写该文件。
+
 运行检查和测试（测试快照写入临时目录）：
 
 ```sh

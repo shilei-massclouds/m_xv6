@@ -3,8 +3,11 @@
 from dataclasses import dataclass
 
 from framework import snapshot_paths
+from framework.contention import DOMAINS
+from framework.contracts import ensures, requires
 from framework.engine import System, TaskLocalEnv
 from framework.sync_primitives import LocalMultiTasks, Preemption, RemoteCpus
+from kernel.proc import ProcState
 
 
 @dataclass
@@ -13,6 +16,11 @@ class BpInitFlow(System):
 
     def start(self, env: TaskLocalEnv, **kwargs):
         from global_vars import gv
+
+        requires(self.hartid == 0)
+        requires(gv.initproc.state is ProcState.UNUSED)
+        requires(gv.childproc.state is ProcState.UNUSED)
+        requires(all(getattr(env.cv, domain) == 0 for domain in DOMAINS))
 
         self.drive(env, "console", "_init")  # consoleinit
         self.drive(env, "io", "_init")  # printkinit
@@ -45,3 +53,16 @@ class BpInitFlow(System):
         RemoteCpus().enable(env.cv)
 
         self.drive(env, "scheduler", "schedule")  # scheduler
+
+        ensures(self.hartid == 0)
+        ensures(gv.initproc.state is ProcState.RUNNABLE)
+        ensures(gv.childproc.state is ProcState.UNUSED)
+        ensures(
+            (
+                env.cv.local_irq,
+                env.cv.local_tasks,
+                env.cv.remote_irq,
+                env.cv.remote_tasks,
+            )
+            == (0, 0, 1, 1)
+        )
