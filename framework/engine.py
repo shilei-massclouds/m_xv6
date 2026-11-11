@@ -7,7 +7,7 @@ from copy import copy
 from dataclasses import dataclass, field
 from os import getenv
 from types import FunctionType
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from framework.contention import (
     DOMAINS,
@@ -16,9 +16,6 @@ from framework.contention import (
     TRANSPARENT_CV,
     ContentionVector,
 )
-
-if TYPE_CHECKING:
-    from kernel.proc import Proc
 
 _VISIBILITY_ATTR = "__visibility__"
 _PROTECTED_BY_ATTR = "__protected_by__"
@@ -33,7 +30,6 @@ def env_enabled(name: str) -> bool:
 @dataclass
 class TaskLocalEnv:
     cv: ContentionVector = field(default_factory=ContentionVector.zeros)
-    task: Proc | None = field(default=None, repr=False)
     depth: int = 0
     signal_queues: list[deque[Signal]] = field(default_factory=list, repr=False)
 
