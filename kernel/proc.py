@@ -95,12 +95,12 @@ class Scheduler(System):
     def schedule(self, env: TaskLocalEnv):
         LocalIrq().enable(env.cv)
         LocalIrq().disable(env.cv)
-        self.drive(env, "scheduler", "_schedule")
+        self.drive(env, "bp_scheduler", "_schedule")
 
     def _schedule(self, env: TaskLocalEnv):
         next_runnable = self.drive(env, "proc_table", "pick_next")
         match next_runnable:
             case NextRunnable.INIT_PROC | NextRunnable.CHILD_PROC:
-                self.drive(env, "scheduler", "_switch")
+                self.drive(env, "bp_scheduler", "_switch")
             case _:
-                self.drive(env, "scheduler", "_wfi")
+                self.drive(env, "bp_scheduler", "_wfi")

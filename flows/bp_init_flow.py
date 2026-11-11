@@ -27,10 +27,10 @@ class BpInitFlow(System):
         self.drive(env, "io", "printk")
         self.drive(env, "page_allocator", "_free_range")  # kinit
         self.drive(env, "kernel_page_table", "_init")  # kvminit
-        self.drive(env, "current_hart", "_set_satp")  # kvminithart
+        self.drive(env, "bp_hart", "_set_satp")  # kvminithart
         self.drive(env, "proc_table", "_init")  # procinit
         self.drive(env, "trap", "_init")  # trapinit
-        self.drive(env, "current_hart", "_set_stvec")  # trapinithart
+        self.drive(env, "bp_hart", "_set_stvec")  # trapinithart
         self.drive(env, "plic", "_init")  # plicinit
         self.drive(env, "plic", "_init_hart", hartid=self.hartid)  # plicinit
         self.drive(env, "bcache", "_init")  # binit
@@ -52,7 +52,7 @@ class BpInitFlow(System):
         Preemption().disable(env.cv)
         RemoteCpus().enable(env.cv)
 
-        self.drive(env, "scheduler", "schedule")  # scheduler
+        self.drive(env, "bp_scheduler", "schedule")  # scheduler
 
         ensures(self.hartid == 0)
         ensures(gv.initproc.state is ProcState.RUNNABLE)

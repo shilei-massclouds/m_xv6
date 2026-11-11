@@ -13,7 +13,7 @@ from flows.bp_init_flow import BpInitFlow
 from framework import snapshot_paths
 from framework.contention import DOMAINS
 from framework.engine import TaskLocalEnv
-from framework.snapshot import SnapshotError, save_snapshot
+from framework.snapshot import SnapshotCompatibilityError, SnapshotError, save_snapshot
 from framework.sync_primitives import LocalMultiTasks
 from global_vars import MODEL_VERSION, GlobalVars, gv
 from kernel.proc import Proc, ProcState, Scheduler
@@ -89,7 +89,7 @@ def test_bp_starts_from_default_globals_and_records_initialized_state(
         snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH,
         expected_checkpoint="bp_initialized",
     )
-    assert metadata["model_version"] == MODEL_VERSION == 2
+    assert metadata["model_version"] == MODEL_VERSION
     assert initialized.initproc.state is ProcState.RUNNABLE
     assert initialized.childproc.state is ProcState.UNUSED
     assert set(snapshot_paths.SNAPSHOT_DIR.iterdir()) == {
@@ -261,6 +261,36 @@ def test_ap_missing_checkpoint_does_not_create_files_or_run_bp(
     assert list(snapshot_paths.SNAPSHOT_DIR.iterdir()) == []
 
 
+def test_ap_rejects_version_two_snapshot_with_old_fields(model: Any) -> None:
+    source = GlobalVars()
+    source.initproc.state = ProcState.RUNNABLE
+    old_state = vars(source)
+    old_state["scheduler"] = old_state.pop("bp_scheduler")
+    old_state["current_hart"] = old_state.pop("bp_hart")
+    del old_state["ap_scheduler"]
+    del old_state["ap_hart"]
+    path = snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH
+    save_snapshot(source, path, checkpoint="bp_initialized", model_version=2)
+    original_bytes = path.read_bytes()
+    current_state = vars(model)
+    current_objects = (
+        model.bp_scheduler,
+        model.ap_scheduler,
+        model.bp_hart,
+        model.ap_hart,
+    )
+
+    with pytest.raises(SnapshotCompatibilityError, match="model_version"):
+        ApInitOrigin().start()
+
+    assert vars(model) is current_state
+    for name, current in zip(
+        ("bp_scheduler", "ap_scheduler", "bp_hart", "ap_hart"), current_objects
+    ):
+        assert getattr(model, name) is current
+    assert path.read_bytes() == original_bytes
+
+
 @pytest.mark.parametrize("args", [(), ("bp_init_origin",)])
 def test_cli_defaults_to_bp_and_accepts_explicit_bp(
     repository: Path, args: tuple[str, ...]
@@ -269,7 +299,7 @@ def test_cli_defaults_to_bp_and_accepts_explicit_bp(
 
     assert first.returncode == 0, first.stderr
     assert "start -> bp_init_flow" in first.stdout
-    assert "schedule -> scheduler" in first.stdout
+    assert "schedule -> bp_scheduler" in first.stdout
     directory = repository / "snapshots"
     initialized_path = directory / "bp_initialized.snap"
     restored = GlobalVars()

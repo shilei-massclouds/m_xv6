@@ -21,7 +21,7 @@ from kernel.proc import PidGen, Proc, ProcTable, Scheduler
 from kernel.trap import Trap
 from kernel.vm import VM, KernelPageTable
 
-MODEL_VERSION = 2
+MODEL_VERSION = 3
 
 
 @dataclass
@@ -36,8 +36,10 @@ class GlobalVars:
     kernel_page_table: KernelPageTable = field(default_factory=KernelPageTable)
     vm: VM = field(default_factory=VM)
     proc_table: ProcTable = field(default_factory=ProcTable)
-    scheduler: Scheduler = field(default_factory=Scheduler)
-    current_hart: CurrentHart = field(default_factory=CurrentHart)
+    bp_scheduler: Scheduler = field(default_factory=Scheduler)
+    ap_scheduler: Scheduler = field(default_factory=Scheduler)
+    bp_hart: CurrentHart = field(default_factory=CurrentHart)
+    ap_hart: CurrentHart = field(default_factory=CurrentHart)
     trap: Trap = field(default_factory=Trap)
     plic: Plic = field(default_factory=Plic)
     bcache: BufferCache = field(default_factory=BufferCache)
