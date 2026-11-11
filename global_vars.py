@@ -9,6 +9,7 @@ from kernel.page_allocator import PageAllocator
 from kernel.vm import KernelPageTable, VM
 from kernel.proc import ProcTable, Proc
 from kernel.proc import PidGen
+from kernel.proc import Scheduler
 from kernel.current import CurrentHart
 from kernel.trap import Trap
 from drivers.uart import Uart
@@ -31,6 +32,7 @@ class GlobalVars:
     kernel_page_table: KernelPageTable = field(default_factory=KernelPageTable)
     vm: VM = field(default_factory=VM)
     proc_table: ProcTable = field(default_factory=ProcTable)
+    scheduler: Scheduler = field(default_factory=Scheduler)
     current_hart: CurrentHart = field(default_factory=CurrentHart)
     trap: Trap = field(default_factory=Trap)
     plic: Plic = field(default_factory=Plic)

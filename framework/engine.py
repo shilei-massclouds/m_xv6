@@ -76,17 +76,17 @@ class Signal:
 @dataclass
 class System:
     def resolve_visibility(self, action: str | None = None) -> ContentionVector:
-        """Copy declarations, then choose a default from the action name."""
+        """Resolve method overrides, transparent wrappers, then class defaults."""
         if action is not None:
             declaration = getattr(getattr(self, action), _VISIBILITY_ATTR, None)
             if declaration is not None:
                 return copy(declaration)
+            if not action.startswith("_"):
+                return copy(TRANSPARENT_CV)
         for cls in type(self).__mro__:
             declaration = cls.__dict__.get(_VISIBILITY_ATTR)
             if declaration is not None:
                 return copy(declaration)
-        if action is not None and not action.startswith("_"):
-            return copy(TRANSPARENT_CV)
         return copy(FULLSCOPE_CV)
 
     def resolve_protected_by(self, action: str | None = None) -> tuple[object, ...]:
@@ -227,8 +227,9 @@ def visibility[T: type[System] | Callable[..., Any]](
 ) -> Callable[[T], T]:
     """Declare a copied visibility on a System subclass or instance method.
 
-    Method declarations take precedence over class declarations. When no
-    declaration is present, the default is ``FULLSCOPE_CV``.
+    Method declarations take precedence. Undeclared methods without an ``_``
+    prefix are transparent. Class declarations apply to methods with an ``_``
+    prefix and to checks without an action; their fallback is ``FULLSCOPE_CV``.
     """
     assert isinstance(declaration, ContentionVector), (
         "visibility expects a ContentionVector"

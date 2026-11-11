@@ -9,6 +9,8 @@ from framework.sync_primitives import GuardBusyWaitIrqSavePreemption
 from framework.sync_primitives import GuardSpinLock
 from kernel.page_allocator import Page
 from framework.sync_primitives import LocalIrq
+from framework.contention import CPUSCOPE_CV, TASKSCOPE_CV
+from framework.engine import visibility
 
 
 class ProcState(Enum):
@@ -71,17 +73,33 @@ class ProcTable(System):
         self.drive(env, "initproc", "_preset")
         self.drive(env, "childproc", "_preset")
 
-    def _schedule(self, env: TaskLocalEnv):
-        LocalIrq().enable(env.cv)
-        LocalIrq().disable(env.cv)
-        match self.next_runnable:
-            case NextRunnable.INIT_PROC | NextRunnable.CHILD_PROC:
-                self.drive(env, "proc_table", "_switch")
-            case _:
-                self.drive(env, "proc_table", "_wfi")
+    def pick_next(self, env: TaskLocalEnv):
+        with GuardSpinLock(env.cv, self):
+            return self.drive(env, "proc_table", "_pick_next")
 
+    def _pick_next(self, env: TaskLocalEnv):
+        return self.next_runnable
+
+
+@dataclass
+@visibility(CPUSCOPE_CV)
+class Scheduler(System):
     def _switch(self, env: TaskLocalEnv):
         pass
 
     def _wfi(self, env: TaskLocalEnv):
         pass
+
+    # Todo: check it only for bp_init_flow
+    def schedule(self, env: TaskLocalEnv):
+        LocalIrq().enable(env.cv)
+        LocalIrq().disable(env.cv)
+        self.drive(env, "scheduler", "_schedule")
+
+    def _schedule(self, env: TaskLocalEnv):
+        next_runnable = self.drive(env, "proc_table", "pick_next")
+        match next_runnable:
+            case NextRunnable.INIT_PROC | NextRunnable.CHILD_PROC:
+                self.drive(env, "scheduler", "_switch")
+            case _:
+                self.drive(env, "scheduler", "_wfi")

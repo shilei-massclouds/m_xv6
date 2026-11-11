@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from framework.engine import System
+from framework.sync_primitives import LocalMultiTasks, Preemption, RemoteCpus
 
 
 @dataclass
@@ -25,7 +26,13 @@ class BpInitFlow(System):
         self.drive(env, "ftable", "_init")  # fileinit
         self.drive(env, "vdisk", "_init")   # virtio_disk_init
         self.drive(env, "initproc", "_init")    # userinit
+
         #
         # Todo: notify other harts by atomic
         #
-        self.drive(env, "proc_table", "_schedule")  # scheduler
+        LocalMultiTasks().enable(env.cv)
+        # Note: bp_init_flow cannot be preempted.
+        Preemption().disable(env.cv)
+        RemoteCpus().enable(env.cv)
+
+        self.drive(env, "scheduler", "schedule")    # scheduler
