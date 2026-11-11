@@ -8,6 +8,7 @@ from structs.array import Array
 from framework.sync_primitives import GuardBusyWaitIrqSavePreemption
 from framework.sync_primitives import GuardSpinLock
 from kernel.page_allocator import Page
+from framework.sync_primitives import LocalIrq
 
 
 class ProcState(Enum):
@@ -51,9 +52,17 @@ class Proc(System):
         self.state = ProcState.RUNNABLE
 
 
+class NextRunnable(Enum):
+    INIT_PROC = "init_proc"
+    CHILD_PROC = "child_proc"
+    NONE = "none"
+
+
 # ProcTable only has the references of `initproc` and `childproc`.
 @dataclass
 class ProcTable(System):
+    next_runnable: NextRunnable = field(default=NextRunnable.INIT_PROC)
+
     def _mapstacks(self, env: TaskLocalEnv):
         self.drive(env, "initproc", "_mapstack")
         self.drive(env, "childproc", "_mapstack")
@@ -63,4 +72,16 @@ class ProcTable(System):
         self.drive(env, "childproc", "_preset")
 
     def _schedule(self, env: TaskLocalEnv):
+        LocalIrq().enable(env.cv)
+        LocalIrq().disable(env.cv)
+        match self.next_runnable:
+            case NextRunnable.INIT_PROC | NextRunnable.CHILD_PROC:
+                self.drive(env, "proc_table", "_switch")
+            case _:
+                self.drive(env, "proc_table", "_wfi")
+
+    def _switch(self, env: TaskLocalEnv):
+        pass
+
+    def _wfi(self, env: TaskLocalEnv):
         pass
