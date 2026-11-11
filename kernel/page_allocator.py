@@ -10,11 +10,11 @@ from framework.sync_primitives import GuardSpinLock
 class PageAllocator(System):
     def _free_range(self, env: TaskLocalEnv):
         # Todo: kfree in loop
-        self.drive(env, "page_allocator", "kfree")
+        self.drive(env, "self", "kfree")
 
     def kfree(self, env: TaskLocalEnv):
         with GuardSpinLock(env.cv, self):
-            self.drive(env, "page_allocator", "_kfree")
+            self.drive(env, "self", "_kfree")
 
     def _kfree(self, env: TaskLocalEnv):
         pass

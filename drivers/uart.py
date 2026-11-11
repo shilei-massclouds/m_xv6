@@ -13,7 +13,7 @@ class Uart(System):
 
     def putc_sync(self, env: TaskLocalEnv):
         with GuardLocalIrq(env.cv), GuardPreemption(env.cv):
-            self.drive(env, "uart", "_putc_sync")
+            self.drive(env, "self", "_putc_sync")
 
     def _putc_sync(self, env: TaskLocalEnv):
         pass

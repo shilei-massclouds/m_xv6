@@ -76,7 +76,7 @@ class ProcTable(System):
 
     def pick_next(self, env: TaskLocalEnv):
         with GuardSpinLock(env.cv, self):
-            return self.drive(env, "proc_table", "_pick_next")
+            return self.drive(env, "self", "_pick_next")
 
     def _pick_next(self, env: TaskLocalEnv):
         return self.next_runnable

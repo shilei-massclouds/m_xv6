@@ -13,7 +13,7 @@ class KernelPageTable(System):
     def _init(self, env: TaskLocalEnv):
         self.table = self.drive(env, "page_allocator", "_kalloc")
         # Todo: multiple segments for mapping
-        self.drive(env, "kernel_page_table", "_kvmmap")
+        self.drive(env, "self", "_kvmmap")
         self.drive(env, "proc_table", "_mapstacks")
 
     def _kvmmap(self, env: TaskLocalEnv):
