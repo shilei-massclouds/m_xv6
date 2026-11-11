@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 
+import snapshot_paths
 from framework.engine import System, TaskLocalEnv
 from framework.sync_primitives import LocalMultiTasks, Preemption, RemoteCpus
 
@@ -11,6 +12,8 @@ class BpInitFlow(System):
     hartid: int = 0
 
     def start(self, env: TaskLocalEnv, **kwargs):
+        from global_vars import gv
+
         self.drive(env, "console", "_init")  # consoleinit
         self.drive(env, "io", "_init")  # printkinit
         self.drive(env, "io", "printk")
@@ -27,6 +30,11 @@ class BpInitFlow(System):
         self.drive(env, "ftable", "_init")  # fileinit
         self.drive(env, "vdisk", "_init")  # virtio_disk_init
         self.drive(env, "initproc", "_init")  # userinit
+
+        gv.save_snapshot(
+            snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH,
+            checkpoint=snapshot_paths.BP_INITIALIZED_CHECKPOINT,
+        )
 
         #
         # Todo: notify other harts by atomic

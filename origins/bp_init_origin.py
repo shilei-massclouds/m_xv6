@@ -1,6 +1,6 @@
 """BootInitTask Origin"""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from framework.engine import TaskLocalEnv
 from origins import Origin
@@ -8,8 +8,7 @@ from origins import Origin
 
 @dataclass
 class BpInitOrigin(Origin):
-    def __init__(self):
-        self.env = TaskLocalEnv()
+    env: TaskLocalEnv = field(default_factory=TaskLocalEnv, repr=False)
 
     def start(self):
         self.drive(self.env, "bp_init_flow", "start")

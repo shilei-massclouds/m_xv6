@@ -1,2 +1,4 @@
 __pycache__/
 *.swp
+/snapshots/*
+!/snapshots/README.md

@@ -1,21 +1,37 @@
 # m_xv6
 
-运行当前 BP 推导流程：
+选择 BP 或 AP 推导入口：
 
 ```sh
 python3 main.py
+python3 main.py bp_init_origin
+python3 main.py ap_init_origin
 ```
 
-文件快照由调用者在需要的位置显式保存和加载。快照机制已提供，当前 main、Origin 和 Flow 仍按原流程运行。
+无参数时运行 BP。位置参数只接受 `bp_init_origin` 和 `ap_init_origin`，未知名称会显示用法并退出。
+
+启动快照路径集中定义在 `snapshot_paths.py`，固定相对于仓库根目录，与当前工作目录无关：
+
+| 文件 | 快照点 | 用途 |
+| --- | --- | --- |
+| `snapshots/bp_initialized.snap` | `bp_initialized` | `initproc` 初始化完成后、启用其他任务和远端竞争前的模型状态 |
+
+每次运行 `main.py` 都在新进程中创建默认的 `gv`，BP 从这些默认值开始推导。BP Flow 在上述记录点显式保存 `bp_initialized.snap`，然后继续原有流程。
+
+AP 直接加载 `bp_initialized.snap` 并检查快照点，文件缺失或无效时会报错，需要先单独运行 BP。AP 不会重新执行 BP。每个 Origin 实例通过 `default_factory` 创建自己的 `TaskLocalEnv`，按一次推导使用；新建 Origin 不会重置 `gv`。`ApInitFlow` 默认 hart 为 1，入口竞争向量为全零，通过同步原语调整后为 `(local_irq=0, local_tasks=0, remote_irq=1, remote_tasks=1)`，目前只调整竞争环境。
+
+加入 AP Flow 后，模型版本提升为 2，旧版本快照按不兼容处理。`snapshots/README.md` 随代码提交以保留目录，运行时生成文件加入忽略规则。
+
+通用文件快照接口也可以由调用者在需要的位置显式使用：
 
 ```python
 from global_vars import gv
 
 # 父目录需要提前创建；checkpoint 是调用者定义的非空快照点名称。
-saved = gv.save_snapshot("/tmp/initial.snap", checkpoint="initial")
+saved = gv.save_snapshot("/tmp/state.snap", checkpoint="manual")
 
 # 可以在另一个进程中加载；两个接口均返回文件头元数据字典。
-loaded = gv.load_snapshot("/tmp/initial.snap", expected_checkpoint="initial")
+loaded = gv.load_snapshot("/tmp/state.snap", expected_checkpoint="manual")
 assert saved == loaded
 ```
 
