@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-import snapshot_paths
+from framework import snapshot_paths
 from framework.engine import System, TaskLocalEnv
 from framework.sync_primitives import LocalMultiTasks, Preemption, RemoteCpus
 

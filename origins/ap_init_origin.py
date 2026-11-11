@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 
-import snapshot_paths
+from framework import snapshot_paths
 from framework.engine import TaskLocalEnv
 from global_vars import gv
 from origins import Origin

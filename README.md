@@ -10,7 +10,9 @@ python3 main.py ap_init_origin
 
 无参数时运行 BP。位置参数只接受 `bp_init_origin` 和 `ap_init_origin`，未知名称会显示用法并退出。
 
-启动快照路径集中定义在 `snapshot_paths.py`，固定相对于仓库根目录，与当前工作目录无关：
+执行 `make` 或 `make run` 会在两个独立进程中依次运行 BP 和 AP。`make clean` 清理 Python 缓存以及 `snapshots/` 下的 `*.snap`，保留该目录中的 `README.md`。
+
+启动快照路径集中定义在 `framework/snapshot_paths.py`，固定相对于仓库根目录，与当前工作目录无关：
 
 | 文件 | 快照点 | 用途 |
 | --- | --- | --- |

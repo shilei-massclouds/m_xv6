@@ -2,7 +2,7 @@
 
 import pytest
 
-import snapshot_paths
+from framework import snapshot_paths
 
 
 @pytest.fixture(autouse=True)

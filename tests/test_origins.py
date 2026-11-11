@@ -9,8 +9,8 @@ from typing import Any
 
 import pytest
 
-import snapshot_paths
 from flows.bp_init_flow import BpInitFlow
+from framework import snapshot_paths
 from framework.contention import DOMAINS
 from framework.engine import TaskLocalEnv
 from framework.snapshot import SnapshotError, save_snapshot

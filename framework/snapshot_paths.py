@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-SNAPSHOT_DIR = Path(__file__).resolve().parent / "snapshots"
+SNAPSHOT_DIR = Path(__file__).resolve().parents[1] / "snapshots"
 BP_INITIALIZED_SNAPSHOT_PATH = SNAPSHOT_DIR / "bp_initialized.snap"
 
 BP_INITIALIZED_CHECKPOINT = "bp_initialized"
