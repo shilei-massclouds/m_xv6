@@ -34,12 +34,6 @@ class TaskLocalEnv:
     signal_queues: list[deque[Signal]] = field(default_factory=list, repr=False)
 
 
-def _emit(env: TaskLocalEnv, queue: deque[Signal], target: str, action: str, **args):
-    indent = "    " * env.depth
-    print(f"{indent}{action} -> {target}")
-    queue.append(Signal(target, action, args, env, queue))
-
-
 def _get_target_ref(path: str) -> System:
     from global_vars import gv
 
@@ -52,6 +46,7 @@ def _get_target_ref(path: str) -> System:
 
 @dataclass
 class Signal:
+    source: System = field(repr=False)
     target: str
     action: str
     args: dict[str, Any]
@@ -59,16 +54,13 @@ class Signal:
     queue: deque[Signal] = field(repr=False)
 
     def handle(self) -> Any:
-        system = _get_target_ref(self.target)
+        system = self.source if self.target == "self" else _get_target_ref(self.target)
         action = getattr(system, self.action)
         system.acquire(self.env, self.action)
         try:
             return action(self.env, **self.args)
         finally:
             system.release(self.env, self.action)
-
-    def chain(self, target: str, action: str, **kwargs):
-        _emit(self.env, self.queue, target, action, **kwargs)
 
 
 @dataclass
@@ -100,7 +92,7 @@ class System:
         return ()
 
     def drive(self, env: TaskLocalEnv, target: str, action: str, **kwargs) -> Any:
-        """Finish this invocation's signal queue before returning to its caller."""
+        """Drain this invocation's queue; the target ``self`` refers to this instance."""
         depth = env.depth
         indent = "    " * depth
         print(f"{indent}{self}:")
@@ -109,7 +101,7 @@ class System:
         env.signal_queues.append(queue)
         env.depth = depth + 1
         try:
-            _emit(env, queue, target, action, **kwargs)
+            self._emit(env, queue, target, action, **kwargs)
             result = queue.popleft().handle()
             while queue:
                 queue.popleft().handle()
@@ -119,7 +111,29 @@ class System:
             env.depth = depth
 
     def emit(self, env: TaskLocalEnv, target: str, action: str, **kwargs):
-        _emit(env, env.signal_queues[-1], target, action, **kwargs)
+        self._emit(env, env.signal_queues[-1], target, action, **kwargs)
+
+    def _emit(
+        self,
+        env: TaskLocalEnv,
+        queue: deque[Signal],
+        target: str,
+        action: str,
+        /,
+        **args,
+    ):
+        indent = "    " * env.depth
+        print(f"{indent}{action} -> {target}")
+        queue.append(
+            Signal(
+                source=self,
+                target=target,
+                action=action,
+                args=args,
+                env=env,
+                queue=queue,
+            )
+        )
 
     def acquire(self, env: TaskLocalEnv, action: str):
         assert self.check_invariant(env, action), self.format_invariant(

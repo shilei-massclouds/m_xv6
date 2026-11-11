@@ -143,7 +143,26 @@ def test_environment_queues_and_protection_aliases(model: Any, tmp_path: Path) -
     env = TaskLocalEnv()
     queue: deque[Signal] = deque()
     env.signal_queues.append(queue)
-    queue.append(Signal("initproc", "_preset", {"root": model}, env, queue))
+    queue.append(
+        Signal(
+            source=model.bp_init_flow,
+            target="initproc",
+            action="_preset",
+            args={"root": model},
+            env=env,
+            queue=queue,
+        )
+    )
+    queue.append(
+        Signal(
+            source=model.initproc,
+            target="self",
+            action="_preset",
+            args={},
+            env=env,
+            queue=queue,
+        )
+    )
     env.cv.protect(model.initproc, "local_irq")
     model.environment = env
     model.save_snapshot(path, checkpoint="queued")
@@ -156,7 +175,15 @@ def test_environment_queues_and_protection_aliases(model: Any, tmp_path: Path) -
     assert signal.env is restored
     assert signal.queue is restored.signal_queues[0]
     assert signal.args["root"] is model
+    assert signal.source is model.bp_init_flow
     assert restored.cv.stacks["local_irq"][-1] is model.initproc
+    self_signal = restored.signal_queues[0][1]
+    assert self_signal.source is model.initproc
+    assert self_signal.source is not env.signal_queues[0][1].source
+    assert self_signal.env is restored
+    assert self_signal.queue is restored.signal_queues[0]
+    assert self_signal.target == "self"
+    assert self_signal.handle() is None
 
 
 def test_bound_methods_keep_their_function_owner_and_aliases(
@@ -290,6 +317,7 @@ print('snapshot restored')
     ("changes", "expected_checkpoint", "message"),
     [
         ({"format_version": 999}, None, "format_version"),
+        ({"model_version": 3}, None, "model_version"),
         ({"model_version": MODEL_VERSION + 1}, None, "model_version"),
         ({}, "wrong", "checkpoint mismatch"),
     ],

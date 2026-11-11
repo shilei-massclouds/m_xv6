@@ -22,7 +22,11 @@ python3 main.py ap_init_origin
 
 AP 直接加载 `bp_initialized.snap` 并检查快照点，文件缺失或无效时会报错，需要先单独运行 BP。AP 不会重新执行 BP。每个 Origin 实例通过 `default_factory` 创建自己的 `TaskLocalEnv`，按一次推导使用；新建 Origin 不会重置 `gv`。`ApInitFlow` 默认 hart 为 1，入口竞争向量为全零，通过同步原语调整后为 `(local_irq=0, local_tasks=0, remote_irq=1, remote_tasks=1)`，目前只调整竞争环境。
 
-BP/AP 分别拥有独立的 hart 和 scheduler 后，模型版本提升为 3，旧版本快照按不兼容处理。`snapshots/README.md` 随代码提交以保留目录，运行时生成文件加入忽略规则。
+Signal 新增来源对象引用后，模型版本提升为 4，旧版本快照按不兼容处理。`snapshots/README.md` 随代码提交以保留目录，运行时生成文件加入忽略规则。
+
+`System.drive(env, "self", action, **kwargs)` 和 `System.emit(env, "self", action, **kwargs)` 将目标绑定到调用它们的 System 实例。创建 Signal 时通过 `source` 保存该实例的引用，处理时解析 `"self"`，随后按原有流程执行 `acquire`、目标方法和 `release`。其他目标名称仍通过 `gv` 路径查找。
+
+嵌套调用和 `emit` 各自记录当前调用对象。队列中的信号保留其来源对象；快照恢复时，来源引用与恢复后的对象图保持一致。
 
 通用文件快照接口也可以由调用者在需要的位置显式使用：
 
