@@ -2,10 +2,12 @@
 
 from dataclasses import dataclass
 
-from framework.engine import System, TaskLocalEnv
+from framework.contention import CPUSCOPE_CV
+from framework.engine import System, TaskLocalEnv, visibility
 
 
 @dataclass
+@visibility(CPUSCOPE_CV)
 class CurrentHart(System):
     def _set_satp(self, env: TaskLocalEnv):
         pass
