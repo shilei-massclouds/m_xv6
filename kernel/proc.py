@@ -74,11 +74,12 @@ class ProcTable(System):
         self.drive(env, "initproc", "_preset")
         self.drive(env, "childproc", "_preset")
 
-    def pick_next(self, env: TaskLocalEnv):
+    def pick_next(self, env: TaskLocalEnv) -> NextRunnable:
         with GuardSpinLock(env.cv, self):
             return self.drive(env, "self", "_pick_next")
 
-    def _pick_next(self, env: TaskLocalEnv):
+    # Note: BlackBox
+    def _pick_next(self, env: TaskLocalEnv) -> NextRunnable:
         return self.next_runnable
 
 
