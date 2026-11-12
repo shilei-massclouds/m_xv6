@@ -16,12 +16,14 @@ class ApInitFlow(System):
         """Placeholder for subsequent AP initialization derivations."""
         from global_vars import gv
 
-        requires(gv.bp_scheduler.state is SchedState.RUNNING)
+        requires(gv.ap_scheduler.state is SchedState.RUNNING)
 
         LocalMultiTasks().enable(env.cv)
         # Note: ap_init_flow cannot be preempted.
         Preemption().disable(env.cv)
         RemoteCpus().enable(env.cv)
+
+        self.drive(env, "smp_started", "wait")
 
         self.drive(env, "ap_scheduler", "schedule")  # scheduler
 

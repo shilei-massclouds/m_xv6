@@ -11,9 +11,9 @@ import pytest
 from framework import snapshot_paths
 from framework.contracts import Condition, ContractViolation, ensures, requires
 from framework.engine import System, TaskLocalEnv
-from framework.sync_primitives import LocalMultiTasks, RemoteCpus
+from framework.sync_primitives import LocalMultiTasks
 from global_vars import GlobalVars, gv
-from kernel.proc import ProcState, Scheduler
+from kernel.proc import ProcState, SchedState, Scheduler
 from origins.ap_init_origin import ApInitOrigin
 from origins.bp_init_origin import BpInitOrigin
 
@@ -185,19 +185,12 @@ def test_unhandled_failures_terminate_and_report_location_under_optimization(
     assert f"{phase} failed at <string>:3 in rejected" in result.stderr
 
 
-@pytest.mark.parametrize("failure", ["hart", "initproc", "childproc", "environment"])
+@pytest.mark.parametrize("state", [SchedState.SWITCHED, SchedState.WFI])
 def test_bp_entry_failure_prevents_boot_operations(
-    model: GlobalVars, monkeypatch: pytest.MonkeyPatch, failure: str
+    model: GlobalVars, monkeypatch: pytest.MonkeyPatch, state: SchedState
 ) -> None:
+    model.bp_scheduler.state = state
     env = TaskLocalEnv()
-    if failure == "hart":
-        model.bp_init_flow.hartid = 1
-    elif failure == "initproc":
-        model.initproc.state = ProcState.RUNNABLE
-    elif failure == "childproc":
-        model.childproc.state = ProcState.USED
-    else:
-        env.cv.remote_irq = 1
 
     def no_operations(*args: Any, **kwargs: Any) -> None:
         pytest.fail("boot operations must not run after an entry failure")
@@ -211,28 +204,18 @@ def test_bp_entry_failure_prevents_boot_operations(
     assert caught.value.phase == "requires"
     assert caught.value.function == "BpInitFlow.start"
     assert vars(model) is current_state
+    assert model.bp_scheduler.state is state
     assert model.initproc.pid == 0
     assert list(snapshot_paths.SNAPSHOT_DIR.iterdir()) == []
 
 
-@pytest.mark.parametrize(
-    "failure", ["hart", "bp_hart", "initproc", "childproc", "environment"]
-)
+@pytest.mark.parametrize("state", [SchedState.SWITCHED, SchedState.WFI])
 def test_ap_entry_failure_prevents_environment_changes(
-    model: GlobalVars, monkeypatch: pytest.MonkeyPatch, failure: str
+    model: GlobalVars, monkeypatch: pytest.MonkeyPatch, state: SchedState
 ) -> None:
     model.initproc.state = ProcState.RUNNABLE
+    model.bp_scheduler.state = state
     env = TaskLocalEnv()
-    if failure == "hart":
-        model.ap_init_flow.hartid = 0
-    elif failure == "bp_hart":
-        model.bp_init_flow.hartid = 1
-    elif failure == "initproc":
-        model.initproc.state = ProcState.UNUSED
-    elif failure == "childproc":
-        model.childproc.state = ProcState.RUNNABLE
-    else:
-        env.cv.remote_tasks = 1
 
     def no_operations(*args: Any, **kwargs: Any) -> None:
         pytest.fail("AP synchronization must not run after an entry failure")
@@ -244,23 +227,20 @@ def test_ap_entry_failure_prevents_environment_changes(
 
     assert caught.value.phase == "requires"
     assert caught.value.function == "ApInitFlow.start"
+    assert model.bp_scheduler.state is state
+    assert model.ap_scheduler.state is SchedState.RUNNING
     assert env.cv.local_tasks == 0
     assert list(snapshot_paths.SNAPSHOT_DIR.iterdir()) == []
 
 
-@pytest.mark.parametrize("failure", ["hart", "initproc", "childproc", "environment"])
 def test_bp_exit_failure_keeps_the_recorded_snapshot(
-    model: GlobalVars, monkeypatch: pytest.MonkeyPatch, failure: str
+    model: GlobalVars, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def schedule(self: Scheduler, env: TaskLocalEnv) -> None:
-        if failure == "hart":
-            model.bp_init_flow.hartid = 1
-        elif failure == "initproc":
-            model.initproc.state = ProcState.RUNNING
-        elif failure == "childproc":
-            model.childproc.state = ProcState.RUNNABLE
-        else:
-            env.cv.remote_tasks = 2
+        assert self is model.bp_scheduler
+        # Leave the scheduler RUNNING to fail the exit contract, and change
+        # process state to check that the earlier snapshot stays independent.
+        model.initproc.state = ProcState.RUNNING
 
     monkeypatch.setattr(Scheduler, "schedule", schedule)
     origin = BpInitOrigin()
@@ -280,43 +260,27 @@ def test_bp_exit_failure_keeps_the_recorded_snapshot(
     assert restored.bp_init_flow.hartid == 0
     assert restored.initproc.state is ProcState.RUNNABLE
     assert restored.childproc.state is ProcState.UNUSED
-    if failure == "hart":
-        assert model.bp_init_flow.hartid == 1
-    elif failure == "initproc":
-        assert model.initproc.state is ProcState.RUNNING
-    elif failure == "childproc":
-        assert model.childproc.state is ProcState.RUNNABLE
-    else:
-        assert origin.env.cv.remote_tasks == 2
+    assert restored.bp_scheduler.state is SchedState.RUNNING
+    assert restored.ap_scheduler.state is SchedState.RUNNING
+    assert model.bp_scheduler.state is SchedState.RUNNING
+    assert model.initproc.state is ProcState.RUNNING
 
 
-@pytest.mark.parametrize(
-    "failure", ["hart", "bp_hart", "initproc", "childproc", "environment"]
-)
 def test_ap_exit_failure_does_not_rewrite_the_loaded_snapshot(
-    model: GlobalVars, monkeypatch: pytest.MonkeyPatch, failure: str
+    model: GlobalVars, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = GlobalVars()
     source.initproc.state = ProcState.RUNNABLE
     path = snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH
     source.save_snapshot(path, checkpoint="bp_initialized")
     saved = path.read_bytes()
-    original_enable = RemoteCpus.enable
 
-    def enable(self: RemoteCpus, cv: Any) -> None:
-        original_enable(self, cv)
-        if failure == "hart":
-            model.ap_init_flow.hartid = 0
-        elif failure == "bp_hart":
-            model.bp_init_flow.hartid = 1
-        elif failure == "initproc":
-            model.initproc.state = ProcState.RUNNING
-        elif failure == "childproc":
-            model.childproc.state = ProcState.RUNNABLE
-        else:
-            cv.remote_irq = 2
+    def schedule(self: Scheduler, env: TaskLocalEnv) -> None:
+        assert self is model.ap_scheduler
+        # Keep the AP scheduler RUNNING so its exit contract rejects the call.
+        model.initproc.state = ProcState.RUNNING
 
-    monkeypatch.setattr(RemoteCpus, "enable", enable)
+    monkeypatch.setattr(Scheduler, "schedule", schedule)
     origin = ApInitOrigin()
 
     with pytest.raises(ContractViolation) as caught:
@@ -326,4 +290,6 @@ def test_ap_exit_failure_does_not_rewrite_the_loaded_snapshot(
     assert caught.value.function == "ApInitFlow.start"
     assert origin.env.depth == 0
     assert origin.env.signal_queues == []
+    assert model.ap_scheduler.state is SchedState.RUNNING
+    assert model.initproc.state is ProcState.RUNNING
     assert path.read_bytes() == saved

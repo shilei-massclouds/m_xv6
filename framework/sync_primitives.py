@@ -113,6 +113,43 @@ class GuardBusyWaitLock(BusyWaitLock):
         self.unlock(self.cv)
 
 
+class SmpAtomic(SyncPrimitive):
+    """Model one indivisible operation on a target in all contention domains.
+
+    The protected scope represents a single SMP atomic operation. IRQ masking,
+    preemption control and memory ordering are outside this model.
+    """
+
+    def __init__(self, target: object | None):
+        self.target = target
+
+    def acquire(self, cv: ContentionVector) -> None:
+        cv.protect(self.target, *DOMAINS)
+
+    def release(self, cv: ContentionVector) -> None:
+        cv.unprotect(self.target, *DOMAINS)
+
+
+class GuardSmpAtomic(SmpAtomic):
+    """Establish and release target protection for one atomic operation."""
+
+    def __init__(self, cv: ContentionVector, target: object | None):
+        super().__init__(target)
+        self.cv = cv
+
+    def __enter__(self) -> Self:
+        self.acquire(self.cv)
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.release(self.cv)
+
+
 class AtomicReserve(SyncPrimitive):
     """Atomically reserve one resource from a set of equivalent resources.
 

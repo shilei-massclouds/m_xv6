@@ -12,6 +12,7 @@ from kernel.proc import SchedState
 @dataclass
 class BpInitFlow(System):
     hartid: int = 0
+    smp_started: bool = False
 
     def start(self, env: TaskLocalEnv, **kwargs):
         from global_vars import gv
@@ -35,18 +36,18 @@ class BpInitFlow(System):
         self.drive(env, "vdisk", "_init")  # virtio_disk_init
         self.drive(env, "initproc", "_init")  # userinit
 
-        gv.save_snapshot(
-            snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH,
-            checkpoint=snapshot_paths.BP_INITIALIZED_CHECKPOINT,
-        )
-
-        #
-        # Todo: notify other harts by atomic
-        #
         LocalMultiTasks().enable(env.cv)
         # Note: bp_init_flow cannot be preempted.
         Preemption().disable(env.cv)
         RemoteCpus().enable(env.cv)
+
+        # Notify other harts to continue.
+        self.drive(env, "smp_started", "notify")
+
+        gv.save_snapshot(
+            snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH,
+            checkpoint=snapshot_paths.BP_INITIALIZED_CHECKPOINT,
+        )
 
         self.drive(env, "bp_scheduler", "schedule")  # scheduler
 

@@ -15,6 +15,7 @@ from fs.buffer import BufferCache
 from fs.file import FileTable
 from fs.inode import InodeTable
 from kernel.current import CurrentHart
+from kernel.flags import SmpStarted
 from kernel.io import IO
 from kernel.page_allocator import PageAllocator
 from kernel.proc import PidGen, Proc, ProcTable, Scheduler
@@ -49,6 +50,7 @@ class GlobalVars:
     initproc: Proc = field(default_factory=Proc)
     childproc: Proc = field(default_factory=Proc)
     pidgen: PidGen = field(default_factory=PidGen)
+    smp_started: SmpStarted = field(default_factory=SmpStarted)
 
     def reset(self):
         self.__init__()
