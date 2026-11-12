@@ -1,28 +1,36 @@
 # m_xv6
 
-选择 BP 或 AP 推导入口：
+选择 BP、AP 或 InitProc 推导入口：
 
 ```sh
 python3 main.py
 python3 main.py bp_init_origin
 python3 main.py ap_init_origin
+python3 main.py initproc_origin --source bp
+python3 main.py initproc_origin --source ap
 ```
 
-无参数时运行 BP。位置参数只接受 `bp_init_origin` 和 `ap_init_origin`，未知名称会显示用法并退出。
+无参数时运行 BP。位置参数接受 `bp_init_origin`、`ap_init_origin` 和 `initproc_origin`，未知名称会显示用法并退出。InitProc 必须显式提供 `--source bp` 或 `--source ap`；BP/AP 入口不接受 `--source`。
 
-执行 `make` 或 `make run` 会在两个独立进程中依次运行 BP 和 AP。`make clean` 清理 Python 缓存以及 `snapshots/` 下的 `*.snap`，保留该目录中的 `README.md`。
+执行 `make` 或 `make run` 会先清理快照，再在四个独立进程中依次运行 BP、AP、来源为 BP 的 InitProc 和来源为 AP 的 InitProc。`make clean` 清理 Python 缓存以及 `snapshots/` 下的 `*.snap`，保留该目录中的 `README.md`。
 
 启动快照路径集中定义在 `framework/snapshot_paths.py`，固定相对于仓库根目录，与当前工作目录无关：
 
 | 文件 | 快照点 | 用途 |
 | --- | --- | --- |
 | `snapshots/bp_initialized.snap` | `bp_initialized` | `initproc` 初始化并通知其他 hart 后、启用本地多任务和调用调度器前的模型状态 |
+| `snapshots/bp_before_schedule.snap` | `bp_before_schedule` | BP 调度器关闭本地 IRQ 后、进入 `_schedule` 前的模型状态，供 InitProc 的 BP 来源使用 |
+| `snapshots/ap_before_schedule.snap` | `ap_before_schedule` | AP 调度器关闭本地 IRQ 后、进入 `_schedule` 前的模型状态，供 InitProc 的 AP 来源使用 |
 
 每次运行 `main.py` 都在新进程中创建默认的 `gv`，BP 从这些默认值开始推导。BP Flow 在上述记录点显式保存 `bp_initialized.snap`，然后继续原有流程。
 
-AP 直接加载 `bp_initialized.snap` 并检查快照点，文件缺失或无效时会报错，需要先单独运行 BP。AP 不会重新执行 BP。每个 Origin 实例通过 `default_factory` 创建自己的 `TaskLocalEnv`，按一次推导使用；新建 Origin 不会重置 `gv`。`ApInitFlow` 默认 hart 为 1。AP Origin 从全零竞争向量开始，禁止抢占并启用远端竞争后，以 `(local_irq=0, local_tasks=-1, remote_irq=1, remote_tasks=1)` 进入 AP Flow。BP 通知其他 hart 和保存快照时也使用这一向量；两条 Flow 都在调用各自调度器前启用本地多任务，此时向量变为 `(0,0,1,1)`。
+`Scheduler.schedule()` 在 `LocalIrq().disable(env.cv)` 之后、调用 `_schedule` 之前，通过与 `gv.bp_scheduler`、`gv.ap_scheduler` 的实例身份比较识别来源，分别保存对应快照。保存后继续调度，随后调度失败也不会撤销已保存的文件。AP 保留已有 BP 快照。
 
-Signal 新增来源对象引用后，模型版本提升为 4，旧版本快照按不兼容处理。`snapshots/README.md` 随代码提交以保留目录，运行时生成文件加入忽略规则。
+AP 直接加载 `bp_initialized.snap` 并检查快照点，文件缺失或无效时会报错，需要先单独运行 BP。AP 不会重新执行 BP。每个 Origin 实例通过 `default_factory` 创建自己的 `TaskLocalEnv`，按一次推导使用；新建 Origin 不会重置 `gv`。`ApInitFlow` 默认 hart 为 1。AP Origin 从全零竞争向量开始，禁止抢占并启用远端竞争后，以 `(local_irq=0, local_tasks=-1, remote_irq=1, remote_tasks=1)` 进入 AP Flow。BP 通知其他 hart 和保存 `bp_initialized.snap` 时也使用这一向量；两条 Flow 都在调用各自调度器前启用本地多任务，此时向量变为 `(0,0,1,1)`。
+
+`InitProcOrigin(source)` 加载所选来源的调度前快照并检查快照点，不会自动补跑 BP/AP，也不会改写来源文件。每个实例新建自己的 `TaskLocalEnv`，不使用快照内可达的环境；只启用远端竞争，以 `(local_irq=0, local_tasks=0, remote_irq=1, remote_tasks=1)` 调用恢复后的 `gv.initproc_flow.start()`。`InitProcFlow` 当前为空骨架，正常返回，保持恢复后的模型状态和竞争向量；本阶段不加入 initproc 执行步骤或进程状态迁移。
+
+`GlobalVars` 新增 `initproc_flow` 字段后，模型版本提升为 5，旧版本快照按不兼容处理，需重新生成。`snapshots/README.md` 随代码提交以保留目录，运行时生成文件加入忽略规则。
 
 `System.drive(env, "self", action, **kwargs)` 和 `System.emit(env, "self", action, **kwargs)` 将目标绑定到调用它们的 System 实例。创建 Signal 时通过 `source` 保存该实例的引用，处理时解析 `"self"`，随后按原有流程执行 `acquire`、目标方法和 `release`。其他目标名称仍通过 `gv` 路径查找。
 

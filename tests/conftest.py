@@ -12,8 +12,9 @@ def isolate_snapshot_paths(
     directory = tmp_path_factory.mktemp("boot") / "snapshots"
     directory.mkdir()
     monkeypatch.setattr(snapshot_paths, "SNAPSHOT_DIR", directory)
-    monkeypatch.setattr(
-        snapshot_paths,
-        "BP_INITIALIZED_SNAPSHOT_PATH",
-        directory / "bp_initialized.snap",
-    )
+    for name, filename in (
+        ("BP_INITIALIZED_SNAPSHOT_PATH", "bp_initialized.snap"),
+        ("BP_BEFORE_SCHEDULE_SNAPSHOT_PATH", "bp_before_schedule.snap"),
+        ("AP_BEFORE_SCHEDULE_SNAPSHOT_PATH", "ap_before_schedule.snap"),
+    ):
+        monkeypatch.setattr(snapshot_paths, name, directory / filename)

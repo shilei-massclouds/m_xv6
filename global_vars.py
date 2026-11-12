@@ -10,6 +10,7 @@ from drivers.uart import Uart
 from drivers.virtio_disk import VirtIODisk
 from flows.ap_init_flow import ApInitFlow
 from flows.bp_init_flow import BpInitFlow
+from flows.initproc_flow import InitProcFlow
 from framework.snapshot import SnapshotMetadata, load_snapshot, save_snapshot
 from fs.buffer import BufferCache
 from fs.file import FileTable
@@ -22,13 +23,14 @@ from kernel.proc import PidGen, Proc, ProcTable, Scheduler
 from kernel.trap import Trap
 from kernel.vm import VM, KernelPageTable
 
-MODEL_VERSION = 4
+MODEL_VERSION = 5
 
 
 @dataclass
 class GlobalVars:
     bp_init_flow: BpInitFlow = field(default_factory=BpInitFlow)
     ap_init_flow: ApInitFlow = field(default_factory=ApInitFlow)
+    initproc_flow: InitProcFlow = field(default_factory=InitProcFlow)
     console: Console = field(default_factory=Console)
     io: IO = field(default_factory=IO)
     uart: Uart = field(default_factory=Uart)

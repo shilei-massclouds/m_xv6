@@ -9,6 +9,8 @@ run:
 	make clean_snap
 	@$(PYTHON) main.py
 	@$(PYTHON) main.py ap_init_origin
+	@$(PYTHON) main.py initproc_origin --source bp
+	@$(PYTHON) main.py initproc_origin --source ap
 
 test:
 	@$(RUFF) check .

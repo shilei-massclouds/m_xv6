@@ -107,7 +107,8 @@ def test_bp_records_initialized_state_before_scheduling(
     assert initialized.ap_scheduler.state is SchedState.RUNNING
     assert initialized.smp_started.started is True
     assert set(snapshot_paths.SNAPSHOT_DIR.iterdir()) == {
-        snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH
+        snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH,
+        snapshot_paths.BP_BEFORE_SCHEDULE_SNAPSHOT_PATH,
     }
 
 
@@ -276,7 +277,8 @@ def test_ap_does_not_adopt_an_environment_reachable_from_the_snapshot(
     assert _levels(origin.env) == (0, 0, 1, 1)
     assert origin.env.depth == 0
     assert set(snapshot_paths.SNAPSHOT_DIR.iterdir()) == {
-        snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH
+        snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH,
+        snapshot_paths.AP_BEFORE_SCHEDULE_SNAPSHOT_PATH,
     }
 
 
@@ -369,7 +371,10 @@ def test_cli_defaults_to_bp_and_accepts_explicit_bp(
     )
     assert metadata["model_version"] == MODEL_VERSION
     assert restored.initproc.state is ProcState.RUNNABLE
-    assert {path.name for path in directory.glob("*.snap")} == {"bp_initialized.snap"}
+    assert {path.name for path in directory.glob("*.snap")} == {
+        "bp_initialized.snap",
+        "bp_before_schedule.snap",
+    }
     assert not (repository.parent / "snapshots").exists()
 
     second = _run_main(repository, *args)
@@ -379,7 +384,9 @@ def test_cli_defaults_to_bp_and_accepts_explicit_bp(
     assert restored.initproc.state is ProcState.RUNNABLE
 
 
-def test_independent_processes_run_bp_then_direct_ap(repository: Path) -> None:
+def test_independent_processes_run_bp_ap_and_both_initproc_sources(
+    repository: Path,
+) -> None:
     bp = _run_main(repository)
     assert bp.returncode == 0, bp.stderr
     directory = repository / "snapshots"
@@ -394,7 +401,21 @@ def test_independent_processes_run_bp_then_direct_ap(repository: Path) -> None:
     ]
     assert "schedule -> ap_scheduler" in ap.stdout
     assert "schedule -> bp_scheduler" not in ap.stdout
-    assert {path.name: path.read_bytes() for path in directory.iterdir()} == before
+    after_ap = {path.name: path.read_bytes() for path in directory.iterdir()}
+    assert after_ap.keys() == before.keys() | {"ap_before_schedule.snap"}
+    for name, data in before.items():
+        assert after_ap[name] == data
+
+    for source in ("bp", "ap"):
+        initproc = _run_main(repository, "initproc_origin", "--source", source)
+        assert initproc.returncode == 0, initproc.stderr
+        assert initproc.stdout.splitlines() == [
+            f"InitProcOrigin(source='{source}'):",
+            "    start -> initproc_flow",
+        ]
+        assert {
+            path.name: path.read_bytes() for path in directory.iterdir()
+        } == after_ap
 
     # Inspect the AP's loaded state in another fresh interpreter, through main.
     probe = subprocess.run(
@@ -451,7 +472,18 @@ main.main()
 
 
 @pytest.mark.parametrize(
-    "args", [("unknown",), ("bp_init_origin", "extra"), ("--hart", "2")]
+    "args",
+    [
+        ("unknown",),
+        ("bp_init_origin", "extra"),
+        ("--hart", "2"),
+        ("initproc_origin",),
+        ("initproc_origin", "--source", "other"),
+        ("initproc_origin", "--source"),
+        ("bp_init_origin", "--source", "bp"),
+        ("ap_init_origin", "--source", "ap"),
+        ("--source", "bp"),
+    ],
 )
 def test_cli_rejects_unknown_origins_and_extra_arguments(
     repository: Path, args: tuple[str, ...]
@@ -462,6 +494,7 @@ def test_cli_rejects_unknown_origins_and_extra_arguments(
     assert "usage:" in result.stderr
     assert "bp_init_origin" in result.stderr
     assert "ap_init_origin" in result.stderr
+    assert "initproc_origin" in result.stderr
     assert result.stdout == ""
     assert {path.name for path in (repository / "snapshots").iterdir()} == {"README.md"}
 
@@ -475,3 +508,26 @@ def test_cli_ap_reports_missing_checkpoint_without_running_bp(repository: Path) 
     assert "Traceback" not in result.stderr
     assert result.stdout == ""
     assert {path.name for path in (repository / "snapshots").iterdir()} == {"README.md"}
+
+
+@pytest.mark.parametrize("source", ["bp", "ap"])
+@pytest.mark.parametrize("failure", ["missing", "corrupt", "wrong_checkpoint"])
+def test_cli_initproc_reports_snapshot_errors_without_running_boot_flows(
+    repository: Path, source: str, failure: str
+) -> None:
+    directory = repository / "snapshots"
+    path = directory / f"{source}_before_schedule.snap"
+    if failure == "corrupt":
+        path.write_bytes(b"broken snapshot")
+    elif failure == "wrong_checkpoint":
+        GlobalVars().save_snapshot(path, checkpoint="wrong")
+    before = {path.name: path.read_bytes() for path in directory.iterdir()}
+
+    result = _run_main(repository, "initproc_origin", "--source", source)
+
+    assert result.returncode == 1
+    assert "cannot load snapshot" in result.stderr
+    assert path.name in result.stderr
+    assert "Traceback" not in result.stderr
+    assert result.stdout == ""
+    assert {path.name: path.read_bytes() for path in directory.iterdir()} == before
