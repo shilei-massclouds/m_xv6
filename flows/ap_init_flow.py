@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from framework.contracts import ensures, requires
 from framework.engine import System, TaskLocalEnv
+from framework.sync_primitives import LocalMultiTasks
 from kernel.proc import SchedState
 
 
@@ -23,6 +24,7 @@ class ApInitFlow(System):
         self.drive(env, "ap_hart", "_set_stvec")  # trapinithart
         self.drive(env, "plic", "_init_hart", hartid=self.hartid)  # plicinit
 
+        LocalMultiTasks().enable(env.cv)
         self.drive(env, "ap_scheduler", "schedule")  # scheduler
 
         ensures(gv.ap_scheduler.state in [SchedState.SWITCHED, SchedState.WFI])

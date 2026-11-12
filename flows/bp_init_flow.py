@@ -36,7 +36,6 @@ class BpInitFlow(System):
         self.drive(env, "vdisk", "_init")  # virtio_disk_init
         self.drive(env, "initproc", "_init")  # userinit
 
-        LocalMultiTasks().enable(env.cv)
         # Note: bp_init_flow cannot be preempted.
         Preemption().disable(env.cv)
         RemoteCpus().enable(env.cv)
@@ -49,6 +48,7 @@ class BpInitFlow(System):
             checkpoint=snapshot_paths.BP_INITIALIZED_CHECKPOINT,
         )
 
+        LocalMultiTasks().enable(env.cv)
         self.drive(env, "bp_scheduler", "schedule")  # scheduler
 
         ensures(gv.bp_scheduler.state in [SchedState.SWITCHED, SchedState.WFI])
