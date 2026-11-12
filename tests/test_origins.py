@@ -16,6 +16,7 @@ from framework.engine import TaskLocalEnv
 from framework.snapshot import SnapshotCompatibilityError, SnapshotError, save_snapshot
 from framework.sync_primitives import LocalMultiTasks
 from global_vars import MODEL_VERSION, GlobalVars, gv
+from kernel.flags import SmpStarted
 from kernel.proc import NextRunnable, Proc, ProcState, SchedState, Scheduler
 from origins.ap_init_origin import ApInitOrigin
 from origins.bp_init_origin import BpInitOrigin
@@ -104,12 +105,13 @@ def test_bp_records_initialized_state_before_scheduling(
     assert initialized.childproc.state is ProcState.UNUSED
     assert initialized.bp_scheduler.state is SchedState.RUNNING
     assert initialized.ap_scheduler.state is SchedState.RUNNING
+    assert initialized.smp_started.started is True
     assert set(snapshot_paths.SNAPSHOT_DIR.iterdir()) == {
         snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH
     }
 
 
-def test_bp_snapshot_is_recorded_before_competitors_even_when_start_fails(
+def test_bp_snapshot_is_recorded_after_notification_even_when_scheduler_fails(
     model: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     origin = BpInitOrigin()
@@ -117,6 +119,7 @@ def test_bp_snapshot_is_recorded_before_competitors_even_when_start_fails(
     original_save = GlobalVars.save_snapshot
     original_init = Proc._init
     original_enable = LocalMultiTasks.enable
+    original_notify = SmpStarted.notify
 
     def init(self: Proc, env: TaskLocalEnv) -> None:
         original_init(self, env)
@@ -125,28 +128,46 @@ def test_bp_snapshot_is_recorded_before_competitors_even_when_start_fails(
     def save(self: GlobalVars, path: Any, *, checkpoint: str) -> Any:
         if checkpoint == "bp_initialized":
             assert model.initproc.state is ProcState.RUNNABLE
-            assert _levels(origin.env) == (0, 0, 0, 0)
+            assert model.smp_started.started is True
+            assert model.bp_scheduler.state is SchedState.RUNNING
+            assert model.ap_scheduler.state is SchedState.RUNNING
+            assert _levels(origin.env) == (0, 0, 1, 1)
             events.append("snapshot")
         return original_save(self, path, checkpoint=checkpoint)
 
     def enable(self: LocalMultiTasks, cv: Any) -> None:
-        assert snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH.is_file()
+        assert not snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH.exists()
         events.append("enable competitors")
         original_enable(self, cv)
 
+    def notify(self: SmpStarted, env: TaskLocalEnv) -> None:
+        assert _levels(env) == (0, 0, 1, 1)
+        assert not self.started
+        original_notify(self, env)
+        assert self.started
+        events.append("notify other harts")
+
     def schedule(self: Scheduler, env: TaskLocalEnv) -> None:
         assert _levels(env) == (0, 0, 1, 1)
+        events.append("schedule")
         raise RuntimeError("scheduler stopped")
 
     monkeypatch.setattr(Proc, "_init", init)
     monkeypatch.setattr(GlobalVars, "save_snapshot", save)
     monkeypatch.setattr(LocalMultiTasks, "enable", enable)
+    monkeypatch.setattr(SmpStarted, "notify", notify)
     monkeypatch.setattr(Scheduler, "schedule", schedule)
 
     with pytest.raises(RuntimeError, match="scheduler stopped"):
         origin.start()
 
-    assert events == ["initproc initialized", "snapshot", "enable competitors"]
+    assert events == [
+        "initproc initialized",
+        "enable competitors",
+        "notify other harts",
+        "snapshot",
+        "schedule",
+    ]
     restored = GlobalVars()
     restored.load_snapshot(
         snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH,
@@ -154,6 +175,7 @@ def test_bp_snapshot_is_recorded_before_competitors_even_when_start_fails(
     )
     assert restored.initproc.state is ProcState.RUNNABLE
     assert restored.childproc.state is ProcState.UNUSED
+    assert restored.smp_started.started is True
     assert origin.env.depth == 0
     assert origin.env.signal_queues == []
 
@@ -195,6 +217,7 @@ def test_ap_restores_bp_state_and_schedules_its_own_cpu(
     assert model.ap_scheduler.state is SchedState.RUNNING
     bp.env.depth = 8
     model.initproc.state = ProcState.UNUSED
+    model.smp_started.started = False
     model.later = True
     original_bytes = snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH.read_bytes()
 
@@ -212,6 +235,7 @@ def test_ap_restores_bp_state_and_schedules_its_own_cpu(
     assert model.bp_scheduler.state is SchedState.RUNNING
     assert model.ap_scheduler.state is expected_state
     assert model.bp_scheduler is not model.ap_scheduler
+    assert model.smp_started.started is True
     assert not hasattr(model, "later")
     assert model.ap_init_flow.hartid == 1
     assert ap.env is not bp.env
@@ -223,7 +247,9 @@ def test_ap_restores_bp_state_and_schedules_its_own_cpu(
         "ApInitOrigin():",
         "    start -> ap_init_flow",
     ]
-    assert "schedule -> ap_scheduler" in output
+    assert output.index("wait -> smp_started") < output.index(
+        "schedule -> ap_scheduler"
+    )
     assert "schedule -> bp_scheduler" not in output
     assert snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH.read_bytes() == original_bytes
 
@@ -233,6 +259,7 @@ def test_ap_does_not_adopt_an_environment_reachable_from_the_snapshot(
 ) -> None:
     source: Any = GlobalVars()
     source.initproc.state = ProcState.RUNNABLE
+    source.smp_started.started = True
     source.bp_environment = TaskLocalEnv(depth=7)
     source.save_snapshot(
         snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH, checkpoint="bp_initialized"
@@ -395,6 +422,7 @@ def inspect_ap(self, env, **kwargs):
     assert gv.bp_scheduler is not gv.ap_scheduler
     assert gv.bp_scheduler.state is SchedState.RUNNING
     assert gv.ap_scheduler.state is SchedState.RUNNING
+    assert gv.smp_started.started is True
     assert (env.cv.local_irq, env.cv.local_tasks,
             env.cv.remote_irq, env.cv.remote_tasks) == (0, 0, 0, 0)
     original_start(self, env, **kwargs)

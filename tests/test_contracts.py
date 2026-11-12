@@ -214,7 +214,7 @@ def test_ap_entry_failure_prevents_environment_changes(
     model: GlobalVars, monkeypatch: pytest.MonkeyPatch, state: SchedState
 ) -> None:
     model.initproc.state = ProcState.RUNNABLE
-    model.bp_scheduler.state = state
+    model.ap_scheduler.state = state
     env = TaskLocalEnv()
 
     def no_operations(*args: Any, **kwargs: Any) -> None:
@@ -227,8 +227,8 @@ def test_ap_entry_failure_prevents_environment_changes(
 
     assert caught.value.phase == "requires"
     assert caught.value.function == "ApInitFlow.start"
-    assert model.bp_scheduler.state is state
-    assert model.ap_scheduler.state is SchedState.RUNNING
+    assert model.bp_scheduler.state is SchedState.RUNNING
+    assert model.ap_scheduler.state is state
     assert env.cv.local_tasks == 0
     assert list(snapshot_paths.SNAPSHOT_DIR.iterdir()) == []
 
@@ -262,6 +262,7 @@ def test_bp_exit_failure_keeps_the_recorded_snapshot(
     assert restored.childproc.state is ProcState.UNUSED
     assert restored.bp_scheduler.state is SchedState.RUNNING
     assert restored.ap_scheduler.state is SchedState.RUNNING
+    assert restored.smp_started.started is True
     assert model.bp_scheduler.state is SchedState.RUNNING
     assert model.initproc.state is ProcState.RUNNING
 
@@ -271,6 +272,7 @@ def test_ap_exit_failure_does_not_rewrite_the_loaded_snapshot(
 ) -> None:
     source = GlobalVars()
     source.initproc.state = ProcState.RUNNABLE
+    source.smp_started.started = True
     path = snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH
     source.save_snapshot(path, checkpoint="bp_initialized")
     saved = path.read_bytes()
