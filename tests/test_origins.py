@@ -423,8 +423,9 @@ def inspect_ap(self, env, **kwargs):
     assert gv.bp_scheduler.state is SchedState.RUNNING
     assert gv.ap_scheduler.state is SchedState.RUNNING
     assert gv.smp_started.started is True
+    # The origin establishes contention before entering the AP flow.
     assert (env.cv.local_irq, env.cv.local_tasks,
-            env.cv.remote_irq, env.cv.remote_tasks) == (0, 0, 0, 0)
+            env.cv.remote_irq, env.cv.remote_tasks) == (0, 0, 1, 1)
     original_start(self, env, **kwargs)
     assert gv.bp_scheduler.state is SchedState.RUNNING
     assert gv.ap_scheduler.state is SchedState.SWITCHED
