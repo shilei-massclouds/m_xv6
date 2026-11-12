@@ -6,7 +6,7 @@
 
 | 文件 | 快照点 | 状态 |
 | --- | --- | --- |
-| `bp_initialized.snap` | `bp_initialized` | BP 完成 `initproc` 初始化后、启用其他任务和远端竞争前的状态 |
+| `bp_initialized.snap` | `bp_initialized` | BP 完成 `initproc` 初始化并通知其他 hart 后、启用本地多任务和调用调度器前的状态 |
 
 BP 在新进程中从 `gv` 的默认值开始推导；AP 从 `bp_initialized.snap` 开始推导。运行入口和通用快照接口参见仓库根目录的 `README.md`。
 

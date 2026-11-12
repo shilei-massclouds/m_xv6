@@ -131,17 +131,19 @@ def test_bp_snapshot_is_recorded_after_notification_even_when_scheduler_fails(
             assert model.smp_started.started is True
             assert model.bp_scheduler.state is SchedState.RUNNING
             assert model.ap_scheduler.state is SchedState.RUNNING
-            assert _levels(origin.env) == (0, 0, 1, 1)
+            assert _levels(origin.env) == (0, -1, 1, 1)
             events.append("snapshot")
         return original_save(self, path, checkpoint=checkpoint)
 
     def enable(self: LocalMultiTasks, cv: Any) -> None:
-        assert not snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH.exists()
-        events.append("enable competitors")
+        assert snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH.exists()
+        assert _levels(origin.env) == (0, -1, 1, 1)
+        events.append("enable local multitasking")
         original_enable(self, cv)
+        assert _levels(origin.env) == (0, 0, 1, 1)
 
     def notify(self: SmpStarted, env: TaskLocalEnv) -> None:
-        assert _levels(env) == (0, 0, 1, 1)
+        assert _levels(env) == (0, -1, 1, 1)
         assert not self.started
         original_notify(self, env)
         assert self.started
@@ -163,9 +165,9 @@ def test_bp_snapshot_is_recorded_after_notification_even_when_scheduler_fails(
 
     assert events == [
         "initproc initialized",
-        "enable competitors",
         "notify other harts",
         "snapshot",
+        "enable local multitasking",
         "schedule",
     ]
     restored = GlobalVars()
@@ -423,9 +425,9 @@ def inspect_ap(self, env, **kwargs):
     assert gv.bp_scheduler.state is SchedState.RUNNING
     assert gv.ap_scheduler.state is SchedState.RUNNING
     assert gv.smp_started.started is True
-    # The origin establishes contention before entering the AP flow.
+    # The origin disables preemption before local multitasking is enabled.
     assert (env.cv.local_irq, env.cv.local_tasks,
-            env.cv.remote_irq, env.cv.remote_tasks) == (0, 0, 1, 1)
+            env.cv.remote_irq, env.cv.remote_tasks) == (0, -1, 1, 1)
     original_start(self, env, **kwargs)
     assert gv.bp_scheduler.state is SchedState.RUNNING
     assert gv.ap_scheduler.state is SchedState.SWITCHED

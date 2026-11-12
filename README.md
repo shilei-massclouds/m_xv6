@@ -16,11 +16,11 @@ python3 main.py ap_init_origin
 
 | 文件 | 快照点 | 用途 |
 | --- | --- | --- |
-| `snapshots/bp_initialized.snap` | `bp_initialized` | `initproc` 初始化完成后、启用其他任务和远端竞争前的模型状态 |
+| `snapshots/bp_initialized.snap` | `bp_initialized` | `initproc` 初始化并通知其他 hart 后、启用本地多任务和调用调度器前的模型状态 |
 
 每次运行 `main.py` 都在新进程中创建默认的 `gv`，BP 从这些默认值开始推导。BP Flow 在上述记录点显式保存 `bp_initialized.snap`，然后继续原有流程。
 
-AP 直接加载 `bp_initialized.snap` 并检查快照点，文件缺失或无效时会报错，需要先单独运行 BP。AP 不会重新执行 BP。每个 Origin 实例通过 `default_factory` 创建自己的 `TaskLocalEnv`，按一次推导使用；新建 Origin 不会重置 `gv`。`ApInitFlow` 默认 hart 为 1，入口竞争向量为全零，通过同步原语调整后为 `(local_irq=0, local_tasks=0, remote_irq=1, remote_tasks=1)`，目前只调整竞争环境。
+AP 直接加载 `bp_initialized.snap` 并检查快照点，文件缺失或无效时会报错，需要先单独运行 BP。AP 不会重新执行 BP。每个 Origin 实例通过 `default_factory` 创建自己的 `TaskLocalEnv`，按一次推导使用；新建 Origin 不会重置 `gv`。`ApInitFlow` 默认 hart 为 1。AP Origin 从全零竞争向量开始，禁止抢占并启用远端竞争后，以 `(local_irq=0, local_tasks=-1, remote_irq=1, remote_tasks=1)` 进入 AP Flow。BP 通知其他 hart 和保存快照时也使用这一向量；两条 Flow 都在调用各自调度器前启用本地多任务，此时向量变为 `(0,0,1,1)`。
 
 Signal 新增来源对象引用后，模型版本提升为 4，旧版本快照按不兼容处理。`snapshots/README.md` 随代码提交以保留目录，运行时生成文件加入忽略规则。
 
@@ -81,7 +81,7 @@ def increase(self, amount):
 
 条件为 `False` 时立即抛出 `ContractViolation`，未捕获时程序终止。错误消息报告调用处的文件、行号、所在函数/方法和 `requires`/`ensures` 阶段，也可以通过异常的 `filename`、`lineno`、`function`、`phase` 属性读取。每条条件单独调用，第一条失败后停止，`python -O` 下仍然检查。
 
-调用者在方法入口和正常出口放置检查；框架不自动包装方法，也不自动复制入口状态。BP/AP 的 `start` 已接入：BP 检查 bootstrap hart 和初始进程状态，AP 检查 hart 1 和 BP 初始化后的进程状态；两者入口 CV 为全零，正常出口检查进程状态和 `(0,0,1,1)` CV。
+调用者在方法入口和正常出口放置检查；框架不自动包装方法，也不自动复制入口状态。BP/AP 的 `start` 已接入：入口检查各自调度器处于 `RUNNING`，正常出口检查其已进入 `SWITCHED` 或 `WFI`。
 
 契约检查与快照相互独立，不隐式保存、加载或回滚状态。BP 已记录的初始化快照描述记录时刻的状态，之后的出口检查失败不会撤销或改写该文件。
 
