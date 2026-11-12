@@ -46,7 +46,7 @@ def test_proc_initialization_rejects_an_in_use_process(state: ProcState) -> None
     proc = Proc(state=state)
 
     with pytest.raises(AssertionError, match="process must be unused"):
-        proc._init(TaskLocalEnv())
+        proc._alloc(TaskLocalEnv())
 
     assert proc.state is state
     assert proc.pid == 0

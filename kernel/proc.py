@@ -37,10 +37,11 @@ class Proc(System):
         self.drive(env, "page_allocator", "_kalloc")
         self.drive(env, "kernel_page_table", "_kvmmap")
 
+    # Early preset in procinit
     def _preset(self, env: TaskLocalEnv):
         pass
 
-    def _init(self, env: TaskLocalEnv):
+    def _alloc(self, env: TaskLocalEnv):
         # Todo: check that `_mapstack` has been called.
         assert self.state == ProcState.UNUSED, (
             "process must be unused before initialization"
@@ -70,6 +71,7 @@ class ProcTable(System):
         self.drive(env, "initproc", "_mapstack")
         self.drive(env, "childproc", "_mapstack")
 
+    # For procinit
     def _init(self, env: TaskLocalEnv):
         self.drive(env, "initproc", "_preset")
         self.drive(env, "childproc", "_preset")

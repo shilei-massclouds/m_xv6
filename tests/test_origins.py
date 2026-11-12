@@ -117,7 +117,7 @@ def test_bp_snapshot_is_recorded_after_notification_even_when_scheduler_fails(
     origin = BpInitOrigin()
     events: list[str] = []
     original_save = GlobalVars.save_snapshot
-    original_init = Proc._init
+    original_init = Proc._alloc
     original_enable = LocalMultiTasks.enable
     original_notify = SmpStarted.notify
 
@@ -154,7 +154,7 @@ def test_bp_snapshot_is_recorded_after_notification_even_when_scheduler_fails(
         events.append("schedule")
         raise RuntimeError("scheduler stopped")
 
-    monkeypatch.setattr(Proc, "_init", init)
+    monkeypatch.setattr(Proc, "_alloc", init)
     monkeypatch.setattr(GlobalVars, "save_snapshot", save)
     monkeypatch.setattr(LocalMultiTasks, "enable", enable)
     monkeypatch.setattr(SmpStarted, "notify", notify)

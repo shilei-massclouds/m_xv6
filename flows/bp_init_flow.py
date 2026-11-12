@@ -34,7 +34,7 @@ class BpInitFlow(System):
         self.drive(env, "itable", "_init")  # iinit
         self.drive(env, "ftable", "_init")  # fileinit
         self.drive(env, "vdisk", "_init")  # virtio_disk_init
-        self.drive(env, "initproc", "_init")  # userinit
+        self.drive(env, "initproc", "_alloc")  # userinit
 
         # Note: bp_init_flow cannot be preempted.
         Preemption().disable(env.cv)
