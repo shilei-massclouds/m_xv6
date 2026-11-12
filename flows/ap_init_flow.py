@@ -4,7 +4,6 @@ from dataclasses import dataclass
 
 from framework.contracts import ensures, requires
 from framework.engine import System, TaskLocalEnv
-from framework.sync_primitives import LocalMultiTasks, Preemption, RemoteCpus
 from kernel.proc import SchedState
 
 
@@ -17,11 +16,6 @@ class ApInitFlow(System):
         from global_vars import gv
 
         requires(gv.ap_scheduler.state is SchedState.RUNNING)
-
-        LocalMultiTasks().enable(env.cv)
-        # Note: ap_init_flow cannot be preempted.
-        Preemption().disable(env.cv)
-        RemoteCpus().enable(env.cv)
 
         self.drive(env, "smp_started", "wait")
 

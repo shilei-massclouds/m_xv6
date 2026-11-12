@@ -64,7 +64,7 @@ class NextRunnable(Enum):
 # ProcTable only has the references of `initproc` and `childproc`.
 @dataclass
 class ProcTable(System):
-    next_runnable: NextRunnable = field(default=NextRunnable.INIT_PROC)
+    next_runnable: NextRunnable = field(default=NextRunnable.INIT_PROC, repr=False)
 
     def _mapstacks(self, env: TaskLocalEnv):
         self.drive(env, "initproc", "_mapstack")
