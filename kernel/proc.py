@@ -30,7 +30,7 @@ class PidGen(System):
 @dataclass
 class Proc(System):
     pid: int = field(default=0)
-    state: ProcState = field(default=ProcState.UNUSED)
+    state: ProcState = field(default=ProcState.UNUSED, repr=False)
     trampoline: Page = field(default_factory=Page)
 
     def _mapstack(self, env: TaskLocalEnv):
@@ -82,16 +82,24 @@ class ProcTable(System):
         return self.next_runnable
 
 
+class SchedState(Enum):
+    RUNNING = "running"
+    SWITCHED = "switched"
+    WFI = "wfi"
+
+
 @dataclass
 @visibility(CPUSCOPE_CV)
 class Scheduler(System):
+    state: SchedState = field(default=SchedState.RUNNING, repr=False)
+
     def _switch(self, env: TaskLocalEnv):
-        pass
+        self.state = SchedState.SWITCHED
 
     def _wfi(self, env: TaskLocalEnv):
-        pass
+        self.state = SchedState.WFI
 
-    # Todo: check it only for bp_init_flow
+    # Todo: check it only for bp_init_flow && ap_init_flow
     def schedule(self, env: TaskLocalEnv):
         LocalIrq().enable(env.cv)
         LocalIrq().disable(env.cv)
