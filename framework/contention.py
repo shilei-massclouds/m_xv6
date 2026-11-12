@@ -84,21 +84,15 @@ class ContentionVector:
         """Check global, class-level, or exact-object protection.
 
         A class placed on a protection stack protects instances of that class
-        and its subclasses. An explicitly declared class-level dependency also
-        matches its class stack entry. Other stack entries retain identity
-        semantics so unrelated objects with equal values are never treated as
-        protected.
+        and its subclasses. Resolved dependencies match stack entries by
+        identity, so unrelated instances with equal values do not establish
+        protection.
         """
         return any(
             protected is None
-            or (
-                isinstance(protected, type)
-                and (
-                    isinstance(target, protected)
-                    or any(protected is declared for declared in protected_by)
-                )
-            )
+            or (isinstance(protected, type) and isinstance(target, protected))
             or protected is target
+            or any(protected is declared for declared in protected_by)
             for protected in self.stacks[domain]
         )
 

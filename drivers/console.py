@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 
-from framework.engine import System, TaskLocalEnv
+from framework.engine import System, TaskLocalEnv, protected_by
 from structs.array import Array
 
 
@@ -25,5 +25,6 @@ class Console(System):
     def _write(self, env: TaskLocalEnv):
         pass
 
+    @protected_by("io")
     def _sync_putc(self, env: TaskLocalEnv):
         self.drive(env, "uart", "putc_sync")

@@ -80,15 +80,15 @@ class System:
         return copy(FULLSCOPE_CV)
 
     def resolve_protected_by(self, action: str | None = None) -> tuple[object, ...]:
-        """Resolve targets whose protection is required before an action."""
+        """Resolve declared paths against the current global object graph."""
         if action is not None:
             declaration = getattr(getattr(self, action), _PROTECTED_BY_ATTR, _MISSING)
             if declaration is not _MISSING:
-                return (declaration,)
+                return (_get_target_ref(cast(str, declaration)),)
         for cls in type(self).__mro__:
             declaration = cls.__dict__.get(_PROTECTED_BY_ATTR, _MISSING)
             if declaration is not _MISSING:
-                return (declaration,)
+                return (_get_target_ref(cast(str, declaration)),)
         return ()
 
     def drive(self, env: TaskLocalEnv, target: str, action: str, **kwargs) -> Any:
@@ -275,13 +275,19 @@ def visibility[T: type[System] | Callable[..., Any]](
 
 
 def protected_by[T: type[System] | Callable[..., Any]](
-    target: object,
+    target: str,
 ) -> Callable[[T], T]:
-    """Declare a target whose protection an action requires.
+    """Name a global target whose protection can satisfy an action boundary.
 
-    The target is required in every visible domain and can also satisfy the
-    action's own target boundary when the action is not transparent.
+    Paths such as ``io`` or ``holder.lock`` are resolved at check time, so
+    declarations follow instance replacements and snapshot restoration.
+    Method declarations override class declarations. Protection must still
+    satisfy the contention count in every visible domain.
     """
+    if not isinstance(target, str):
+        raise TypeError("protected_by expects an object path string")
+    if not all(name.isidentifier() for name in target.split(".")):
+        raise ValueError("protected_by expects a nonempty dotted object path")
 
     def decorate(declaration: T) -> T:
         if isinstance(declaration, type):

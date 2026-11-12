@@ -18,6 +18,10 @@ class ApInitFlow(System):
         requires(gv.ap_scheduler.state is SchedState.RUNNING)
 
         self.drive(env, "smp_started", "wait")
+        self.drive(env, "io", "printk")
+        # self.drive(env, "ap_hart", "_set_satp")  # kvminithart
+        # self.drive(env, "ap_hart", "_set_stvec")  # trapinithart
+        # self.drive(env, "plic", "_init_hart", hartid=self.hartid)  # plicinit
 
         self.drive(env, "ap_scheduler", "schedule")  # scheduler
 

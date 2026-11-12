@@ -28,6 +28,19 @@ Signal 新增来源对象引用后，模型版本提升为 4，旧版本快照�
 
 嵌套调用和 `emit` 各自记录当前调用对象。队列中的信号保留其来源对象；快照恢复时，来源引用与恢复后的对象图保持一致。
 
+`@protected_by("io")` 将类或方法的保护关系关联到 `gv.io`。声明接受非空对象路径，也支持 `"holder.lock"` 这样的点号路径；方法声明覆盖类声明。每次检查时都从当前 `gv` 解析路径，因此替换对象或恢复快照后会使用当前实例。名称不存在时抛出 `AttributeError`。
+
+```python
+from framework.engine import protected_by
+
+
+@protected_by("io")
+def _sync_putc(self, env):
+    self.drive(env, "uart", "putc_sync")
+```
+
+声明本身不加锁。调用者仍需通过 `GuardSpinLock(env.cv, gv.io)` 等原语建立保护；保护栈按对象身份匹配，其他同类实例不能代替 `gv.io`。每个可见竞争域仍需满足计数约束。Console 和 UART 的同步输出方法都声明由 `"io"` 保护，使 `IO.printk` 持有的实例保护能覆盖整条输出链路。
+
 通用文件快照接口也可以由调用者在需要的位置显式使用：
 
 ```python
