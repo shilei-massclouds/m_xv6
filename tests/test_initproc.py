@@ -139,17 +139,29 @@ def test_initproc_restores_and_calls_the_saved_flow_without_changing_state(
     origin = InitProcOrigin(source)
     other_origin = InitProcOrigin(source)
     original_start = InitProcFlow.start
-    original_enable = RemoteCpus.enable
+    original_enable_local_tasks = LocalMultiTasks.enable
+    original_enable_remote_cpus = RemoteCpus.enable
     calls: list[tuple[str, object]] = []
 
-    def no_boot_or_local_changes(*args: Any, **kwargs: Any) -> None:
-        pytest.fail("InitProc must only restore the snapshot and enable remote CPUs")
+    def unexpected_operation(*args: Any, **kwargs: Any) -> None:
+        pytest.fail(
+            "InitProc must only restore the snapshot and enable local multitasking "
+            "and remote CPUs"
+        )
 
-    def enable(self: RemoteCpus, cv: ContentionVector) -> None:
+    def enable_local_tasks(self: LocalMultiTasks, cv: ContentionVector) -> None:
         assert cv is origin.env.cv
         assert _levels(origin.env) == (0, 0, 0, 0)
+        calls.append(("enable local multitasking", cv))
+        original_enable_local_tasks(self, cv)
+        assert _levels(origin.env) == (0, 1, 0, 0)
+
+    def enable_remote_cpus(self: RemoteCpus, cv: ContentionVector) -> None:
+        assert cv is origin.env.cv
+        assert _levels(origin.env) == (0, 1, 0, 0)
         calls.append(("enable remote CPUs", cv))
-        original_enable(self, cv)
+        original_enable_remote_cpus(self, cv)
+        assert _levels(origin.env) == (0, 1, 1, 1)
 
     def start(self: InitProcFlow, env: TaskLocalEnv, **kwargs: Any) -> None:
         assert model is original_root
@@ -166,7 +178,7 @@ def test_initproc_restores_and_calls_the_saved_flow_without_changing_state(
         assert env is not model.saved_environment
         assert env.cv is not model.saved_environment.cv
         assert model.saved_environment.depth == 7
-        assert _levels(env) == (0, 0, 1, 1)
+        assert _levels(env) == (0, 1, 1, 1)
         state = vars(model)
         saved_state = pickle.dumps(state)
         cv = env.cv
@@ -178,22 +190,23 @@ def test_initproc_restores_and_calls_the_saved_flow_without_changing_state(
         assert pickle.dumps(state) == saved_state
         assert env.cv is cv
         assert pickle.dumps(vars(cv)) == saved_cv
-        assert _levels(env) == (0, 0, 1, 1)
+        assert _levels(env) == (0, 1, 1, 1)
         calls.append(("start", self))
 
-    monkeypatch.setattr(BpInitFlow, "start", no_boot_or_local_changes)
-    monkeypatch.setattr(ApInitFlow, "start", no_boot_or_local_changes)
-    monkeypatch.setattr(LocalIrq, "enable", no_boot_or_local_changes)
-    monkeypatch.setattr(LocalIrq, "disable", no_boot_or_local_changes)
-    monkeypatch.setattr(LocalMultiTasks, "enable", no_boot_or_local_changes)
-    monkeypatch.setattr(Preemption, "disable", no_boot_or_local_changes)
-    monkeypatch.setattr(Preemption, "enable", no_boot_or_local_changes)
-    monkeypatch.setattr(RemoteCpus, "enable", enable)
+    monkeypatch.setattr(BpInitFlow, "start", unexpected_operation)
+    monkeypatch.setattr(ApInitFlow, "start", unexpected_operation)
+    monkeypatch.setattr(LocalIrq, "enable", unexpected_operation)
+    monkeypatch.setattr(LocalIrq, "disable", unexpected_operation)
+    monkeypatch.setattr(LocalMultiTasks, "enable", enable_local_tasks)
+    monkeypatch.setattr(Preemption, "disable", unexpected_operation)
+    monkeypatch.setattr(Preemption, "enable", unexpected_operation)
+    monkeypatch.setattr(RemoteCpus, "enable", enable_remote_cpus)
     monkeypatch.setattr(InitProcFlow, "start", start)
 
     origin.start()
 
     assert calls == [
+        ("enable local multitasking", origin.env.cv),
         ("enable remote CPUs", origin.env.cv),
         ("start", model.initproc_flow),
     ]
@@ -201,7 +214,7 @@ def test_initproc_restores_and_calls_the_saved_flow_without_changing_state(
     assert origin.env.cv is not other_origin.env.cv
     assert origin.env.signal_queues is not other_origin.env.signal_queues
     assert _levels(other_origin.env) == (0, 0, 0, 0)
-    assert _levels(origin.env) == (0, 0, 1, 1)
+    assert _levels(origin.env) == (0, 1, 1, 1)
     assert origin.env.depth == 0
     assert origin.env.signal_queues == []
     assert {
@@ -249,6 +262,7 @@ def test_initproc_rejects_bad_sources_without_fallback_or_model_changes(
     monkeypatch.setattr(BpInitFlow, "start", no_flows)
     monkeypatch.setattr(ApInitFlow, "start", no_flows)
     monkeypatch.setattr(InitProcFlow, "start", no_flows)
+    monkeypatch.setattr(LocalMultiTasks, "enable", no_flows)
     monkeypatch.setattr(RemoteCpus, "enable", no_flows)
 
     with pytest.raises(SnapshotError, match=path.name):
