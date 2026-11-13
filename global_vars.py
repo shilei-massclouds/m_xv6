@@ -14,9 +14,10 @@ from flows.initproc_flow import InitProcFlow
 from framework.snapshot import SnapshotMetadata, load_snapshot, save_snapshot
 from fs.buffer import BufferCache
 from fs.file import FileTable
+from fs.fs import FileSystem
 from fs.inode import InodeTable
 from kernel.current import CurrentHart
-from kernel.flags import SmpStarted
+from kernel.flags import FirstProc, SmpStarted
 from kernel.io import IO
 from kernel.page_allocator import PageAllocator
 from kernel.proc import PidGen, Proc, ProcTable, Scheduler
@@ -53,6 +54,8 @@ class GlobalVars:
     childproc: Proc = field(default_factory=Proc)
     pidgen: PidGen = field(default_factory=PidGen)
     smp_started: SmpStarted = field(default_factory=SmpStarted)
+    first_proc: FirstProc = field(default_factory=FirstProc)
+    fs: FileSystem = field(default_factory=FileSystem)
 
     def reset(self):
         self.__init__()

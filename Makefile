@@ -6,7 +6,7 @@ DEBUG ?= n
 export DEBUG
 
 run:
-	make clean_snap
+	@make clean_snap
 	@$(PYTHON) main.py
 	@$(PYTHON) main.py ap_init_origin
 	@$(PYTHON) main.py initproc_origin --source bp
@@ -21,7 +21,7 @@ test:
 clean:
 	@find . -type d \( -name __pycache__ -o -name .pytest_cache -o -name .ruff_cache \) -prune -exec rm -rf {} +
 	@find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
-	make clean_snap
+	@make clean_snap
 
 clean_snap:
 	@rm -f snapshots/*.snap

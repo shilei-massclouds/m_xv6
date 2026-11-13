@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from framework import snapshot_paths
-from framework.contention import CPUSCOPE_CV
+from framework.contention import CPUSCOPE_CV, TASKPRIVATE_CV
 from framework.engine import System, TaskLocalEnv, visibility
 from framework.sync_primitives import (
     GuardSpinLock,
@@ -55,6 +55,10 @@ class Proc(System):
         self.drive(env, "vm", "_mappages", pt=self.pagetable)
         # Todo: p->cwd = namei("/");
         self.state = ProcState.RUNNABLE
+
+    @visibility(TASKPRIVATE_CV)
+    def _kexec(self, env: TaskLocalEnv):
+        pass
 
 
 class NextRunnable(Enum):

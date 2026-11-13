@@ -23,3 +23,17 @@ class SmpStarted(System):
 
     def _wait(self, env: TaskLocalEnv):
         assert self.started
+
+
+@dataclass
+class FirstProc(System):
+    first: bool = True
+
+    def check(self, env: TaskLocalEnv) -> bool:
+        with GuardSmpAtomic(env.cv, self):
+            return self.drive(env, "self", "_check")
+
+    def _check(self, env: TaskLocalEnv) -> bool:
+        ret = self.first
+        self.first = False
+        return ret
