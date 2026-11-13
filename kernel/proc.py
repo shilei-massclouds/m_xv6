@@ -82,12 +82,12 @@ class ProcTable(System):
         self.drive(env, "initproc", "_preset")
         self.drive(env, "childproc", "_preset")
 
-    def pick_next(self, env: TaskLocalEnv) -> NextRunnable:
+    def pick_runnable(self, env: TaskLocalEnv) -> NextRunnable:
         with GuardSpinLock(env.cv, self):
-            return self.drive(env, "self", "_pick_next")
+            return self.drive(env, "self", "_pick_runnable")
 
     # Note: BlackBox
-    def _pick_next(self, env: TaskLocalEnv) -> NextRunnable:
+    def _pick_runnable(self, env: TaskLocalEnv) -> NextRunnable:
         requires(
             [
                 not self.has_runnable,
@@ -115,6 +115,35 @@ class ProcTable(System):
             ]
         )
         return nextp
+
+    def put_runnable(self, env: TaskLocalEnv):
+        with GuardSpinLock(env.cv, self):
+            self.drive(env, "self", "_put_runnable")
+
+    # Note: BlackBox
+    def _put_runnable(self, env: TaskLocalEnv):
+        requires(
+            [
+                not self.has_runnable,
+                self.has_runnable,
+            ]
+        )
+
+        # Drives other system.actions
+        self.has_runnable = True
+
+        ensures(
+            [
+                # NoRunnable -> HasRunnable
+                [
+                    self.has_runnable
+                ],
+                # HasRunnable -> HasRunnable
+                [
+                    self.has_runnable
+                ],
+            ]
+        )
 
 
 class SchedState(Enum):
@@ -153,7 +182,7 @@ class Scheduler(System):
         self.drive(env, "self", "_schedule")
 
     def _schedule(self, env: TaskLocalEnv):
-        next_runnable = self.drive(env, "proc_table", "pick_next")
+        next_runnable = self.drive(env, "proc_table", "pick_runnable")
         match next_runnable:
             case NextRunnable.INIT_PROC | NextRunnable.CHILD_PROC:
                 self.drive(env, "self", "_switch")
