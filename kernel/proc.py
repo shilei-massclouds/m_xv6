@@ -5,6 +5,7 @@ from enum import Enum
 
 from framework import snapshot_paths
 from framework.contention import CPUSCOPE_CV, TASKPRIVATE_CV
+from framework.contracts import ensures, requires
 from framework.engine import System, TaskLocalEnv, visibility
 from framework.sync_primitives import (
     GuardSpinLock,
@@ -70,7 +71,7 @@ class NextRunnable(Enum):
 # ProcTable only has the references of `initproc` and `childproc`.
 @dataclass
 class ProcTable(System):
-    next_runnable: NextRunnable = field(default=NextRunnable.INIT_PROC, repr=False)
+    has_runnable: bool = True
 
     def _mapstacks(self, env: TaskLocalEnv):
         self.drive(env, "initproc", "_mapstack")
@@ -87,7 +88,33 @@ class ProcTable(System):
 
     # Note: BlackBox
     def _pick_next(self, env: TaskLocalEnv) -> NextRunnable:
-        return self.next_runnable
+        requires(
+            [
+                not self.has_runnable,
+                self.has_runnable,
+            ]
+        )
+
+        # Drives other system.actions
+        if self.has_runnable:
+            nextp = NextRunnable.INIT_PROC
+        else:
+            nextp = NextRunnable.NONE
+
+        ensures(
+            [
+                # NoRunnable -> NoRunnable
+                [
+                    (not self.has_runnable) and nextp is NextRunnable.NONE,
+                ],
+                # HasRunnable -> NoRunnable | HasRunnable
+                [
+                    (not self.has_runnable) and nextp is NextRunnable.INIT_PROC,
+                    self.has_runnable and nextp is NextRunnable.INIT_PROC,
+                ],
+            ]
+        )
+        return nextp
 
 
 class SchedState(Enum):

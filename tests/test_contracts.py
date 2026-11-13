@@ -1,4 +1,4 @@
-"""Explicit contracts fail at the caller and preserve snapshot independence."""
+"""Branch contracts preserve entry selections and snapshot independence."""
 
 import subprocess
 import sys
@@ -9,16 +9,16 @@ from typing import Any
 import pytest
 
 from framework import snapshot_paths
-from framework.contracts import Condition, ContractViolation, ensures, requires
+from framework.contracts import ContractViolation, ensures, requires
 from framework.engine import System, TaskLocalEnv
 from framework.sync_primitives import LocalMultiTasks
 from global_vars import GlobalVars, gv
-from kernel.proc import ProcState, SchedState, Scheduler
+from kernel.proc import NextRunnable, ProcState, SchedState, Scheduler
 from origins.ap_init_origin import ApInitOrigin
 from origins.bp_init_origin import BpInitOrigin
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-type Check = Callable[[Condition], None]
+type Check = Callable[[Any], None]
 
 
 @pytest.fixture
@@ -31,99 +31,145 @@ def model() -> Iterator[GlobalVars]:
         gv.__dict__ = previous_state
 
 
-def _true() -> bool:
-    return True
+@pytest.mark.parametrize("branch_count", [1, 2, 7])
+def test_entry_alternatives_select_the_corresponding_exit_row(
+    branch_count: int,
+) -> None:
+    def run(selected: int) -> None:
+        requires([index == selected for index in range(branch_count)])
+        ensures([[False, index == selected, False] for index in range(branch_count)])
+
+    for selected in range(branch_count):
+        run(selected)
 
 
-def _false() -> bool:
-    return False
-
-
-@pytest.mark.parametrize("check", [requires, ensures])
-@pytest.mark.parametrize("condition", [True, lambda: True, _true])
-def test_true_conditions_succeed(check: Check, condition: Condition) -> None:
-    assert check(condition) is None
-
-
-@pytest.mark.parametrize("check", [requires, ensures])
-@pytest.mark.parametrize("condition", [False, lambda: False, _false])
-def test_false_conditions_report_the_explicit_call_site(
-    check: Check, condition: Condition
+@pytest.mark.parametrize("conditions", [[], [False], [False, False, False]])
+def test_unmatched_entries_report_the_explicit_call_site(
+    conditions: list[bool],
 ) -> None:
     line = sys._getframe().f_lineno + 2
     with pytest.raises(ContractViolation) as caught:
-        check(condition)
+        requires(conditions)
 
     violation = caught.value
-    phase = "requires" if check is requires else "ensures"
-    assert violation.phase == phase
+    assert violation.phase == "requires"
     assert violation.filename == __file__
     assert violation.lineno == line
     assert (
         violation.function
-        == test_false_conditions_report_the_explicit_call_site.__qualname__
+        == test_unmatched_entries_report_the_explicit_call_site.__qualname__
     )
-    assert f"{phase} failed at {__file__}:{line}" in str(violation)
+    assert violation.branch_index is None
+    assert f"requires failed at {__file__}:{line}" in str(violation)
     assert violation.function in str(violation)
 
 
-@pytest.mark.parametrize("check", [requires, ensures])
-@pytest.mark.parametrize("result", [False, True])
-def test_predicates_are_called_once(check: Check, result: bool) -> None:
-    calls = 0
+@pytest.mark.parametrize("selected", [0, 1, 2])
+def test_an_unselected_exit_row_cannot_satisfy_the_contract(selected: int) -> None:
+    requires([index == selected for index in range(3)])
+    line = sys._getframe().f_lineno + 2
+    with pytest.raises(ContractViolation) as caught:
+        ensures([[index != selected] for index in range(3)])
 
-    def predicate() -> bool:
-        nonlocal calls
-        calls += 1
-        return result
-
-    if result:
-        check(predicate)
-    else:
-        with pytest.raises(ContractViolation):
-            check(predicate)
-
-    assert calls == 1
+    violation = caught.value
+    assert violation.phase == "ensures"
+    assert violation.filename == __file__
+    assert violation.lineno == line
+    assert violation.branch_index == selected
+    assert f"entry branch {selected}" in str(violation)
 
 
-@pytest.mark.parametrize("check", [requires, ensures])
-@pytest.mark.parametrize("condition", [None, 0, 1, "False", lambda: None, lambda: 1])
-def test_non_boolean_conditions_are_rejected(check: Check, condition: Any) -> None:
-    with pytest.raises(TypeError, match="expects a bool or a callable returning bool"):
-        check(condition)
+def test_entry_selection_is_saved_before_arguments_and_state_change() -> None:
+    entries = [False, True]
+    requires(entries)
+    entries[:] = [True, False]
+    ensures([[False], [False, True]])
 
 
-@pytest.mark.parametrize("check", [requires, ensures])
-def test_predicate_exceptions_propagate(check: Check) -> None:
-    error = RuntimeError("predicate evaluation failed")
-
-    def predicate() -> bool:
-        raise error
-
-    with pytest.raises(RuntimeError) as caught:
-        check(predicate)
-
-    assert caught.value is error
+def test_unselected_empty_exit_rows_are_ignored() -> None:
+    requires([False, True])
+    ensures([[], [True]])
 
 
-def test_methods_can_check_parameters_and_locals_through_closures() -> None:
+def test_an_empty_selected_exit_row_fails() -> None:
+    requires([True])
+    with pytest.raises(ContractViolation, match="entry branch 0"):
+        ensures([[]])
+
+
+def test_ensures_without_requires_uses_one_unconditional_entry() -> None:
+    ensures([[False, True]])
+
+
+@pytest.mark.parametrize(
+    "conditions",
+    [None, True, 1, "true", (True,), [1], [True, None], [True, lambda: True]],
+)
+def test_requires_rejects_non_lists_and_non_boolean_elements(conditions: Any) -> None:
+    with pytest.raises(TypeError, match="expects a (list of bool|bool)"):
+        requires(conditions)
+
+
+@pytest.mark.parametrize(
+    "branches",
+    [None, True, ([],), [True], [[1]], [[True, None]], [[True], [lambda: True]]],
+)
+def test_ensures_validates_the_shape_and_all_rows(branches: Any) -> None:
+    with pytest.raises(TypeError, match="expects a (list|bool)"):
+        ensures(branches)
+
+
+@pytest.mark.parametrize("rows", [[], [[True]], [[True], [True], [True]]])
+def test_exit_row_count_must_match_entry_branch_count(rows: list[list[bool]]) -> None:
+    requires([False, True])
+    with pytest.raises(ValueError, match="row count.*expected 2"):
+        ensures(rows)
+
+
+def test_ensures_without_requires_requires_exactly_one_row() -> None:
+    with pytest.raises(ValueError, match="row count.*expected 1"):
+        ensures([[True], [True]])
+
+
+def test_overlapping_entry_branches_are_rejected_for_the_current_call() -> None:
+    with pytest.raises(ValueError, match="branches overlap.*0, 2"):
+        requires([True, False, True])
+
+
+@pytest.mark.parametrize(
+    ("check", "argument"), [(requires, [True]), (ensures, [[True]])]
+)
+def test_each_contract_phase_can_only_be_called_once(
+    check: Check, argument: Any
+) -> None:
+    check(argument)
+    with pytest.raises(ValueError, match="at most once"):
+        check(argument)
+
+
+def test_requires_cannot_follow_ensures() -> None:
+    ensures([[True]])
+    with pytest.raises(ValueError, match="must precede"):
+        requires([True])
+
+
+def test_caught_entry_failures_cannot_be_followed_by_a_successful_exit() -> None:
+    with pytest.raises(ContractViolation):
+        requires([False])
+    with pytest.raises(ValueError, match="successful requires"):
+        ensures([[True]])
+
+
+def test_methods_can_check_parameters_and_locals() -> None:
     class Counter:
         def __init__(self):
             self.value = 1
 
-        def is_positive(self) -> bool:
-            return self.value > 0
-
         def increase(self, amount: int) -> None:
-            requires(self.is_positive)
-            requires(lambda: amount > 0)
+            requires([self.value > 0 and amount > 0])
             previous = self.value
             self.value += amount
-
-            def increased() -> bool:
-                return self.value > previous
-
-            ensures(increased)
+            ensures([[self.value > previous]])
 
     counter = Counter()
     counter.increase(3)
@@ -133,7 +179,7 @@ def test_methods_can_check_parameters_and_locals_through_closures() -> None:
 def test_method_diagnostics_use_the_qualified_name() -> None:
     class Example:
         def run(self) -> None:
-            ensures(False)
+            ensures([[False]])
 
     with pytest.raises(ContractViolation) as caught:
         Example().run()
@@ -141,22 +187,119 @@ def test_method_diagnostics_use_the_qualified_name() -> None:
     assert caught.value.function == Example.run.__qualname__
 
 
-def test_the_first_failure_stops_later_checks_and_operations() -> None:
+def test_conditions_are_evaluated_before_the_contract_call() -> None:
     calls: list[str] = []
 
-    def condition(name: str) -> bool:
+    def condition(name: str, result: bool) -> bool:
         calls.append(name)
-        return False
+        return result
+
+    requires([condition("first", True), condition("second", False)])
+    ensures([[condition("exit first", True), condition("exit second", False)], []])
+
+    assert calls == ["first", "second", "exit first", "exit second"]
+
+
+def test_expression_exceptions_propagate() -> None:
+    error = RuntimeError("expression evaluation failed")
+
+    def condition() -> bool:
+        raise error
+
+    with pytest.raises(RuntimeError) as caught:
+        requires([condition()])
+
+    assert caught.value is error
+
+
+def test_an_entry_failure_prevents_the_method_body() -> None:
+    calls: list[str] = []
 
     def run() -> None:
-        requires(lambda: condition("first"))
-        requires(lambda: condition("second"))
+        requires([False, False])
         calls.append("body")
 
     with pytest.raises(ContractViolation):
         run()
 
-    assert calls == ["first"]
+    assert calls == []
+
+
+def test_nested_calls_keep_their_own_entry_selection() -> None:
+    def inner() -> None:
+        requires([False, True])
+        ensures([[False], [True]])
+
+    requires([True, False])
+    inner()
+    ensures([[True], [False]])
+
+
+def test_ensures_only_in_a_nested_call_does_not_adopt_the_outer_entry() -> None:
+    def inner() -> None:
+        ensures([[True]])
+
+    requires([False, True])
+    inner()
+    ensures([[False], [True]])
+
+
+def test_recursion_keeps_a_separate_selection_for_each_invocation() -> None:
+    def recurse(depth: int) -> None:
+        requires([depth % 2 == 0, depth % 2 == 1])
+        if depth:
+            recurse(depth - 1)
+        ensures([[depth % 2 == 0], [depth % 2 == 1]])
+
+    recurse(5)
+
+
+def test_suspended_generators_keep_independent_entry_selections() -> None:
+    def run(first: bool) -> Iterator[None]:
+        requires([first, not first])
+        yield
+        ensures([[first], [not first]])
+
+    first = run(True)
+    second = run(False)
+    next(first)
+    next(second)
+    with pytest.raises(StopIteration):
+        next(first)
+    with pytest.raises(StopIteration):
+        next(second)
+
+
+@pytest.mark.parametrize("failure", ["entry", "body", "exit", "early_return"])
+def test_repeated_calls_do_not_reuse_state_after_failure_or_early_return(
+    failure: str,
+) -> None:
+    def run(fail: bool) -> None:
+        requires([fail and failure != "entry", not fail])
+        if fail and failure == "body":
+            raise RuntimeError("body failed")
+        if fail and failure == "early_return":
+            return
+        ensures([[failure != "exit"], [True]])
+
+    if failure == "early_return":
+        run(True)
+    else:
+        with pytest.raises((ContractViolation, RuntimeError)):
+            run(True)
+    run(False)
+
+
+@pytest.mark.parametrize(
+    ("has_runnable", "expected"),
+    [(False, NextRunnable.NONE), (True, NextRunnable.INIT_PROC)],
+)
+def test_pick_next_checks_the_corresponding_entry_and_exit_branch(
+    model: GlobalVars, has_runnable: bool, expected: NextRunnable
+) -> None:
+    model.proc_table.has_runnable = has_runnable
+
+    assert model.proc_table._pick_next(TaskLocalEnv()) is expected
 
 
 @pytest.mark.parametrize("phase", ["requires", "ensures"])
@@ -165,9 +308,10 @@ def test_unhandled_failures_terminate_and_report_location_under_optimization(
     phase: str, optimization: tuple[str, ...]
 ) -> None:
     script = (
-        f"from framework.contracts import {phase}\n"
+        "from framework.contracts import requires, ensures\n"
         "def rejected():\n"
-        f"    {phase}(lambda: False)\n"
+        f"    requires([{phase == 'ensures'}])\n"
+        "    ensures([[False]])\n"
         "    print('unreachable')\n"
         "rejected()\n"
     )
@@ -182,7 +326,8 @@ def test_unhandled_failures_terminate_and_report_location_under_optimization(
     assert result.returncode != 0
     assert result.stdout == ""
     assert "ContractViolation" in result.stderr
-    assert f"{phase} failed at <string>:3 in rejected" in result.stderr
+    line = 3 if phase == "requires" else 4
+    assert f"{phase} failed at <string>:{line} in rejected" in result.stderr
 
 
 @pytest.mark.parametrize("state", [SchedState.SWITCHED, SchedState.WFI])

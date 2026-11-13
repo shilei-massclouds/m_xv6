@@ -212,7 +212,7 @@ def test_scheduler_self_calls_remain_on_the_invoked_instance(
 
     monkeypatch.setattr(Scheduler, "_switch", switch)
     monkeypatch.setattr(Scheduler, "_wfi", wfi)
-    model.proc_table.next_runnable = next_runnable
+    model.proc_table.has_runnable = next_runnable is not NextRunnable.NONE
     scheduler = getattr(model, scheduler_name)
     env = TaskLocalEnv(
         cv=ContentionVector(local_irq=0, local_tasks=0, remote_irq=1, remote_tasks=1)

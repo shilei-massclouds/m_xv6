@@ -17,7 +17,7 @@ class BpInitFlow(System):
     def start(self, env: TaskLocalEnv, **kwargs):
         from global_vars import gv
 
-        requires(gv.bp_scheduler.state is SchedState.RUNNING)
+        requires([gv.bp_scheduler.state is SchedState.RUNNING])
 
         self.drive(env, "console", "_init")  # consoleinit
         self.drive(env, "io", "_init")  # printkinit
@@ -51,4 +51,11 @@ class BpInitFlow(System):
         LocalMultiTasks().enable(env.cv)
         self.drive(env, "bp_scheduler", "schedule")  # scheduler
 
-        ensures(gv.bp_scheduler.state in [SchedState.SWITCHED, SchedState.WFI])
+        ensures(
+            [
+                [
+                    gv.bp_scheduler.state is SchedState.SWITCHED,
+                    gv.bp_scheduler.state is SchedState.WFI,
+                ]
+            ]
+        )

@@ -72,24 +72,33 @@ assert saved == loaded
 
 Pickle 加载会执行代码，只加载可信来源的快照。动态属性也需支持 Pickle；局部函数、lambda、打开的文件等不受支持，保存时会明确报错。
 
-方法契约通过 `framework/contracts.py` 中的 `requires(condition)` 和 `ensures(condition)` 显式检查：
+方法契约通过 `framework/contracts.py` 中的 `requires(list[bool])` 和 `ensures(list[list[bool]])` 显式检查。每次方法调用至多执行一次 `requires` 和一次 `ensures`：
 
 ```python
 from framework.contracts import ensures, requires
 
 
-def increase(self, amount):
-    requires(amount > 0)
+def adjust(self, amount):
+    requires([amount > 0, amount < 0])
     previous = self.value
     self.value += amount
-    ensures(lambda: self.value > previous)
+    ensures(
+        [
+            [self.value > previous],  # 对应入口 amount > 0
+            [self.value < previous],  # 对应入口 amount < 0
+        ]
+    )
 ```
 
-参数接受布尔值，或返回布尔值的无参 callable，包括 lambda、普通函数和绑定方法。普通布尔表达式在调用前求值，callable 在检查时调用一次；需要参数时可用 lambda 包起来。非布尔值或 callable 返回非布尔值会抛出 `TypeError`；条件执行自身抛出的异常直接向上传播。
+`requires` 的元素做 OR，至少一项为真才允许继续执行，入口分支必须互斥。框架保存入口成立的分支索引；`ensures` 外层长度必须与入口分支数相同，只检查对应的一行，该行的元素也做 OR。方法内修改状态不会改变已选择的入口分支。未选中的出口行不参与成败判定，但所有行的参数类型都会验证。
 
-条件为 `False` 时立即抛出 `ContractViolation`，未捕获时程序终止。错误消息报告调用处的文件、行号、所在函数/方法和 `requires`/`ensures` 阶段，也可以通过异常的 `filename`、`lineno`、`function`、`phase` 属性读取。每条条件单独调用，第一条失败后停止，`python -O` 下仍然检查。
+`requires([])` 必然失败；被选中的出口行为空也必然失败。可以只写 `requires`；只写 `ensures` 时按隐含的 `requires([True])` 处理，外层只能有一行。重复调用同一阶段、`requires` 出现在 `ensures` 之后、出口行数不匹配或当前调用有多个入口分支同时为真，均抛出 `ValueError`。完整证明条件在所有可能输入下互斥的机制仍为 TODO，契约编写者需保证互斥。
 
-调用者在方法入口和正常出口放置检查；框架不自动包装方法，也不自动复制入口状态。BP/AP 的 `start` 已接入：入口检查各自调度器处于 `RUNNING`，正常出口检查其已进入 `SWITCHED` 或 `WFI`。
+列表元素只接受布尔值，形状或元素类型不匹配时抛出 `TypeError`，不接受 lambda 等 callable。Python 在调用契约函数前计算列表中的所有表达式，因此列表元素之间没有短路求值；条件表达式内仍可使用 `and` 和 `or`。表达式自身抛出的异常直接向上传播。
+
+入口没有成立的分支，或选中出口行没有成立的条件时，立即抛出 `ContractViolation`，未捕获时程序终止。错误消息报告调用处的文件、行号、函数/方法名和 `requires`/`ensures` 阶段，也可以通过异常的 `filename`、`lineno`、`function`、`phase` 属性读取。出口失败还报告从 0 开始的入口分支索引 `branch_index`。`python -O` 下仍然检查。
+
+入口选择保存在当前 Python 调用帧的保留局部变量 `__m_xv6_contract_state__` 中，随调用结束释放；直接调用、嵌套、递归及交错恢复的生成器各自独立。调用者在方法入口和正常出口显式放置检查，框架不自动包装方法或补跑遗漏的出口检查。BP/AP 的 `start` 检查调度器从 `RUNNING` 到 `SWITCHED` 或 `WFI`，InitProc 检查内核态到用户态，`ProcTable._pick_next` 按入口的 `has_runnable` 分支检查出口。
 
 契约检查与快照相互独立，不隐式保存、加载或回滚状态。BP 已记录的初始化快照描述记录时刻的状态，之后的出口检查失败不会撤销或改写该文件。
 

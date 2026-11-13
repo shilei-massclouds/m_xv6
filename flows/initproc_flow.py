@@ -18,7 +18,7 @@ class InitProcFlow(System):
     priv: Privilege = field(default=Privilege.KERNEL, repr=False)
 
     def start(self, env: TaskLocalEnv, **kwargs):
-        requires(self.priv is Privilege.KERNEL)
+        requires([self.priv is Privilege.KERNEL])
 
         first = self.drive(env, "first_proc", "check")
         if first:
@@ -27,7 +27,7 @@ class InitProcFlow(System):
         # Todo: prepare_return
         self.drive(env, "self", "userret")
 
-        ensures(self.priv is Privilege.USER)
+        ensures([[self.priv is Privilege.USER]])
 
     # Todo: record current hart
     def userret(self, env: TaskLocalEnv, **kwargs):

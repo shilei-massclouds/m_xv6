@@ -16,7 +16,7 @@ class ApInitFlow(System):
         """Placeholder for subsequent AP initialization derivations."""
         from global_vars import gv
 
-        requires(gv.ap_scheduler.state is SchedState.RUNNING)
+        requires([gv.ap_scheduler.state is SchedState.RUNNING])
 
         self.drive(env, "smp_started", "wait")
         self.drive(env, "io", "printk")
@@ -27,4 +27,11 @@ class ApInitFlow(System):
         LocalMultiTasks().enable(env.cv)
         self.drive(env, "ap_scheduler", "schedule")  # scheduler
 
-        ensures(gv.ap_scheduler.state in [SchedState.SWITCHED, SchedState.WFI])
+        ensures(
+            [
+                [
+                    gv.ap_scheduler.state is SchedState.SWITCHED,
+                    gv.ap_scheduler.state is SchedState.WFI,
+                ]
+            ]
+        )

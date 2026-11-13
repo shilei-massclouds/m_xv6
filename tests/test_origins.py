@@ -80,7 +80,7 @@ def _levels(env: TaskLocalEnv) -> tuple[int, ...]:
 def test_bp_records_initialized_state_before_scheduling(
     model: Any, next_runnable: NextRunnable, expected_state: SchedState
 ) -> None:
-    model.proc_table.next_runnable = next_runnable
+    model.proc_table.has_runnable = next_runnable is not NextRunnable.NONE
     original_root = model
     original_proc = model.initproc
     assert model.initproc.state is ProcState.UNUSED
@@ -213,7 +213,7 @@ def test_ap_restores_bp_state_and_schedules_its_own_cpu(
     next_runnable: NextRunnable,
     expected_state: SchedState,
 ) -> None:
-    model.proc_table.next_runnable = next_runnable
+    model.proc_table.has_runnable = next_runnable is not NextRunnable.NONE
     bp = BpInitOrigin()
     bp.start()
     assert model.bp_scheduler.state is expected_state
