@@ -1,4 +1,4 @@
-"""Scheduling checkpoints feed independent, currently empty InitProc flows."""
+"""Scheduling checkpoints feed independent InitProc initialization flows."""
 
 import pickle
 from collections.abc import Iterator
@@ -8,7 +8,7 @@ import pytest
 
 from flows.ap_init_flow import ApInitFlow
 from flows.bp_init_flow import BpInitFlow
-from flows.initproc_flow import InitProcFlow
+from flows.initproc_flow import InitProcFlow, Privilege
 from framework import snapshot_paths
 from framework.contention import DOMAINS, ContentionVector
 from framework.engine import TaskLocalEnv
@@ -114,13 +114,17 @@ def test_scheduler_saves_after_disabling_irq_before_scheduling(
 
 
 @pytest.mark.parametrize("source", ["bp", "ap"])
-def test_initproc_restores_and_calls_the_saved_flow_without_changing_state(
+@pytest.mark.parametrize("first", [True, False])
+def test_initproc_restores_the_saved_flow_and_returns_to_user_mode(
     model: Any,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
     source: Literal["bp", "ap"],
+    first: bool,
 ) -> None:
     model.saved_environment = TaskLocalEnv(depth=7)
     model.initproc_flow.marker = [source]
+    model.first_proc.first = first
     bp = BpInitOrigin()
     bp.start()
     boot_envs = [bp.env]
@@ -134,6 +138,8 @@ def test_initproc_restores_and_calls_the_saved_flow_without_changing_state(
     original_root = model
     stale_flow = model.initproc_flow
     stale_flow.marker = ["live"]
+    stale_flow.priv = Privilege.USER
+    model.first_proc.first = not first
     model.initproc.state = ProcState.RUNNING
     model.later = True
     origin = InitProcOrigin(source)
@@ -145,8 +151,7 @@ def test_initproc_restores_and_calls_the_saved_flow_without_changing_state(
 
     def unexpected_operation(*args: Any, **kwargs: Any) -> None:
         pytest.fail(
-            "InitProc must only restore the snapshot and enable local multitasking "
-            "and remote CPUs"
+            "InitProc must not rerun boot flows or change IRQ or preemption state"
         )
 
     def enable_local_tasks(self: LocalMultiTasks, cv: ContentionVector) -> None:
@@ -168,6 +173,8 @@ def test_initproc_restores_and_calls_the_saved_flow_without_changing_state(
         assert self is model.initproc_flow
         assert self is not stale_flow
         assert model.initproc_flow.marker == [source]
+        assert self.priv is Privilege.KERNEL
+        assert model.first_proc.first is first
         assert model.initproc.state is ProcState.RUNNABLE
         assert model.childproc.state is ProcState.UNUSED
         assert model.bp_scheduler.state is SchedState.RUNNING
@@ -180,14 +187,18 @@ def test_initproc_restores_and_calls_the_saved_flow_without_changing_state(
         assert model.saved_environment.depth == 7
         assert _levels(env) == (0, 1, 1, 1)
         state = vars(model)
-        saved_state = pickle.dumps(state)
         cv = env.cv
         saved_cv = pickle.dumps(vars(cv))
 
         assert original_start(self, env, **kwargs) is None
 
         assert vars(model) is state
-        assert pickle.dumps(state) == saved_state
+        assert self.priv is Privilege.USER
+        assert model.first_proc.first is False
+        assert model.initproc.state is ProcState.RUNNABLE
+        assert model.childproc.state is ProcState.UNUSED
+        assert model.bp_scheduler.state is SchedState.RUNNING
+        assert model.ap_scheduler.state is SchedState.RUNNING
         assert env.cv is cv
         assert pickle.dumps(vars(cv)) == saved_cv
         assert _levels(env) == (0, 1, 1, 1)
@@ -202,9 +213,23 @@ def test_initproc_restores_and_calls_the_saved_flow_without_changing_state(
     monkeypatch.setattr(Preemption, "enable", unexpected_operation)
     monkeypatch.setattr(RemoteCpus, "enable", enable_remote_cpus)
     monkeypatch.setattr(InitProcFlow, "start", start)
+    capsys.readouterr()
 
     origin.start()
 
+    actions = [
+        line.strip() for line in capsys.readouterr().out.splitlines() if " -> " in line
+    ]
+    expected_actions = [
+        "start -> initproc_flow",
+        "check -> first_proc",
+        "_check -> self",
+    ]
+    if first:
+        expected_actions.extend(
+            ["_first_init -> self", "_init -> fs", "_kexec -> initproc"]
+        )
+    assert actions == [*expected_actions, "userret -> self"]
     assert calls == [
         ("enable local multitasking", origin.env.cv),
         ("enable remote CPUs", origin.env.cv),

@@ -1,4 +1,4 @@
-"""Initial process flow skeleton."""
+"""Initialize the first process and return to user mode."""
 
 from dataclasses import dataclass, field
 from enum import Enum

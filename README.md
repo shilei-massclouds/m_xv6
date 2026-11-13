@@ -28,7 +28,7 @@ python3 main.py initproc_origin --source ap
 
 AP 直接加载 `bp_initialized.snap` 并检查快照点，文件缺失或无效时会报错，需要先单独运行 BP。AP 不会重新执行 BP。每个 Origin 实例通过 `default_factory` 创建自己的 `TaskLocalEnv`，按一次推导使用；新建 Origin 不会重置 `gv`。`ApInitFlow` 默认 hart 为 1。AP Origin 从全零竞争向量开始，禁止抢占并启用远端竞争后，以 `(local_irq=0, local_tasks=-1, remote_irq=1, remote_tasks=1)` 进入 AP Flow。BP 通知其他 hart 和保存 `bp_initialized.snap` 时也使用这一向量；两条 Flow 都在调用各自调度器前启用本地多任务，此时向量变为 `(0,0,1,1)`。
 
-`InitProcOrigin(source)` 加载所选来源的调度前快照并检查快照点，不会自动补跑 BP/AP，也不会改写来源文件。每个实例新建自己的 `TaskLocalEnv`，不使用快照内可达的环境；依次启用本地多任务和远端竞争，以 `(local_irq=0, local_tasks=1, remote_irq=1, remote_tasks=1)` 调用恢复后的 `gv.initproc_flow.start()`。`InitProcFlow` 当前为空骨架，正常返回，保持恢复后的模型状态和竞争向量；本阶段不加入 initproc 执行步骤或进程状态迁移。
+`InitProcOrigin(source)` 加载所选来源的调度前快照并检查快照点，不会自动补跑 BP/AP，也不会改写来源文件。每个实例新建自己的 `TaskLocalEnv`，不使用快照内可达的环境；依次启用本地多任务和远端竞争，以 `(local_irq=0, local_tasks=1, remote_irq=1, remote_tasks=1)` 调用恢复后的 `gv.initproc_flow.start()`。`InitProcFlow` 要求入口处于内核态，通过原子检查读取并清除 `first_proc.first`；首次运行时依次调用文件系统初始化和 `initproc._kexec`，非首次运行时跳过这两步，随后通过 `userret` 切换到用户态。正常返回后竞争向量保持不变。
 
 `GlobalVars` 新增 `initproc_flow` 字段后，模型版本提升为 5，旧版本快照按不兼容处理，需重新生成。`snapshots/README.md` 随代码提交以保留目录，运行时生成文件加入忽略规则。
 

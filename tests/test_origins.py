@@ -409,10 +409,16 @@ def test_independent_processes_run_bp_ap_and_both_initproc_sources(
     for source in ("bp", "ap"):
         initproc = _run_main(repository, "initproc_origin", "--source", source)
         assert initproc.returncode == 0, initproc.stderr
-        assert initproc.stdout.splitlines() == [
+        assert initproc.stdout.splitlines()[:2] == [
             f"InitProcOrigin(source='{source}'):",
             "    start -> initproc_flow",
         ]
+        assert (
+            initproc.stdout.index("check -> first_proc")
+            < initproc.stdout.index("_init -> fs")
+            < initproc.stdout.index("_kexec -> initproc")
+            < initproc.stdout.index("userret -> self")
+        )
         assert {
             path.name: path.read_bytes() for path in directory.iterdir()
         } == after_ap
