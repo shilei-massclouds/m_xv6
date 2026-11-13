@@ -98,7 +98,7 @@ def adjust(self, amount):
 
 入口没有成立的分支，或选中出口行没有成立的条件时，立即抛出 `ContractViolation`，未捕获时程序终止。错误消息报告调用处的文件、行号、函数/方法名和 `requires`/`ensures` 阶段，也可以通过异常的 `filename`、`lineno`、`function`、`phase` 属性读取。出口失败还报告从 0 开始的入口分支索引 `branch_index`。`python -O` 下仍然检查。
 
-入口选择保存在当前 Python 调用帧的保留局部变量 `__m_xv6_contract_state__` 中，随调用结束释放；直接调用、嵌套、递归及交错恢复的生成器各自独立。调用者在方法入口和正常出口显式放置检查，框架不自动包装方法或补跑遗漏的出口检查。BP/AP 的 `start` 检查调度器从 `RUNNING` 到 `SWITCHED` 或 `WFI`，InitProc 检查内核态到用户态，`ProcTable._pick_next` 按入口的 `has_runnable` 分支检查出口。
+入口选择保存在当前 Python 调用帧的保留局部变量 `__m_xv6_contract_state__` 中，随调用结束释放；直接调用、嵌套、递归及交错恢复的生成器各自独立。调用者在方法入口和正常出口显式放置检查，框架不自动包装方法或补跑遗漏的出口检查。BP/AP 的 `start` 检查调度器从 `RUNNING` 到 `SWITCHED` 或 `WFI`，InitProc 检查内核态到用户态，`ProcTable._pick_runnable` 按入口的 `has_runnable` 分支检查出口。
 
 契约检查与快照相互独立，不隐式保存、加载或回滚状态。BP 已记录的初始化快照描述记录时刻的状态，之后的出口检查失败不会撤销或改写该文件。
 

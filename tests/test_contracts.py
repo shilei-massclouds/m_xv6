@@ -294,12 +294,12 @@ def test_repeated_calls_do_not_reuse_state_after_failure_or_early_return(
     ("has_runnable", "expected"),
     [(False, NextRunnable.NONE), (True, NextRunnable.INIT_PROC)],
 )
-def test_pick_next_checks_the_corresponding_entry_and_exit_branch(
+def test_pick_runnable_checks_the_corresponding_entry_and_exit_branch(
     model: GlobalVars, has_runnable: bool, expected: NextRunnable
 ) -> None:
     model.proc_table.has_runnable = has_runnable
 
-    assert model.proc_table._pick_next(TaskLocalEnv()) is expected
+    assert model.proc_table._pick_runnable(TaskLocalEnv()) is expected
 
 
 @pytest.mark.parametrize("phase", ["requires", "ensures"])

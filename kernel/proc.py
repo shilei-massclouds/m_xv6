@@ -135,13 +135,9 @@ class ProcTable(System):
         ensures(
             [
                 # NoRunnable -> HasRunnable
-                [
-                    self.has_runnable
-                ],
+                [self.has_runnable],
                 # HasRunnable -> HasRunnable
-                [
-                    self.has_runnable
-                ],
+                [self.has_runnable],
             ]
         )
 
