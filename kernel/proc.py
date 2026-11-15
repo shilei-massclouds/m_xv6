@@ -91,18 +91,18 @@ class ProcTable(System):
     def _pick_runnable(self, env: TaskLocalEnv, **kwargs):
         requires(
             [
+                # NoRunnable
                 not self.has_runnable,
+                # HasRunnable
                 self.has_runnable,
             ]
         )
 
-        # Drives other system.actions
-        if self.has_runnable:
-            nextp = NextRunnable.INIT_PROC
-        else:
-            nextp = NextRunnable.NONE
-
-        kwargs["ret"].value = nextp
+        match self.has_runnable:
+            case False:
+                nextp = NextRunnable.NONE
+            case True:
+                nextp = NextRunnable.INIT_PROC
 
         ensures(
             [
@@ -118,6 +118,8 @@ class ProcTable(System):
             ]
         )
 
+        kwargs["ret"].value = nextp
+
     def put_runnable(self, env: TaskLocalEnv):
         with GuardSpinLock(env.cv, self):
             self.drive(env, "self", "_put_runnable")
@@ -126,7 +128,9 @@ class ProcTable(System):
     def _put_runnable(self, env: TaskLocalEnv):
         requires(
             [
+                # NoRunnable
                 not self.has_runnable,
+                # HasRunnable
                 self.has_runnable,
             ]
         )
