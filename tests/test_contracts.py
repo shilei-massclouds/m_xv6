@@ -16,6 +16,7 @@ from global_vars import GlobalVars, gv
 from kernel.proc import NextRunnable, ProcState, SchedState, Scheduler
 from origins.ap_init_origin import ApInitOrigin
 from origins.bp_init_origin import BpInitOrigin
+from structs.holder import Holder
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 type Check = Callable[[Any], None]
@@ -294,12 +295,19 @@ def test_repeated_calls_do_not_reuse_state_after_failure_or_early_return(
     ("has_runnable", "expected"),
     [(False, NextRunnable.NONE), (True, NextRunnable.INIT_PROC)],
 )
+@pytest.mark.parametrize("action", ["pick_runnable", "_pick_runnable"])
 def test_pick_runnable_checks_the_corresponding_entry_and_exit_branch(
-    model: GlobalVars, has_runnable: bool, expected: NextRunnable
+    model: GlobalVars, has_runnable: bool, expected: NextRunnable, action: str
 ) -> None:
     model.proc_table.has_runnable = has_runnable
+    result = Holder[NextRunnable]()
+    env = TaskLocalEnv()
 
-    assert model.proc_table._pick_runnable(TaskLocalEnv()) is expected
+    assert getattr(model.proc_table, action)(env, ret=result) is None
+
+    assert result.value is expected
+    assert env.depth == 0
+    assert env.signal_queues == []
 
 
 @pytest.mark.parametrize("phase", ["requires", "ensures"])

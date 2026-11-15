@@ -36,6 +36,8 @@ AP 直接加载 `bp_initialized.snap` 并检查快照点，文件缺失或无效
 
 嵌套调用和 `emit` 各自记录当前调用对象。队列中的信号保留其来源对象；快照恢复时，来源引用与恢复后的对象图保持一致。
 
+动作可以通过 `structs/holder.py` 中的 `Holder[T]` 传递输出参数，其 `value` 初始为 `None`。例如，调度器创建 `Holder[NextRunnable]()`，通过 `ret=holder` 传给 `pick_runnable`；该方法将同一对象继续传给 `_pick_runnable`，由后者写入 `ret.value`。两层方法均返回 `None`，调用者在 `drive` 完成后读取 `holder.value`；`ret` 是必须显式传入的关键字参数。
+
 `@protected_by("io")` 将类或方法的保护关系关联到 `gv.io`。声明接受非空对象路径，也支持 `"holder.lock"` 这样的点号路径；方法声明覆盖类声明。每次检查时都从当前 `gv` 解析路径，因此替换对象或恢复快照后会使用当前实例。名称不存在时抛出 `AttributeError`。
 
 ```python

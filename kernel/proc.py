@@ -12,6 +12,7 @@ from framework.sync_primitives import (
     LocalIrq,
 )
 from kernel.page_allocator import Page
+from structs.holder import Holder
 
 
 class ProcState(Enum):
@@ -82,12 +83,12 @@ class ProcTable(System):
         self.drive(env, "initproc", "_preset")
         self.drive(env, "childproc", "_preset")
 
-    def pick_runnable(self, env: TaskLocalEnv) -> NextRunnable:
+    def pick_runnable(self, env: TaskLocalEnv, **kwargs):
         with GuardSpinLock(env.cv, self):
-            return self.drive(env, "self", "_pick_runnable")
+            self.drive(env, "self", "_pick_runnable", **kwargs)
 
     # Note: BlackBox
-    def _pick_runnable(self, env: TaskLocalEnv) -> NextRunnable:
+    def _pick_runnable(self, env: TaskLocalEnv, **kwargs):
         requires(
             [
                 not self.has_runnable,
@@ -100,6 +101,8 @@ class ProcTable(System):
             nextp = NextRunnable.INIT_PROC
         else:
             nextp = NextRunnable.NONE
+
+        kwargs["ret"].value = nextp
 
         ensures(
             [
@@ -114,7 +117,6 @@ class ProcTable(System):
                 ],
             ]
         )
-        return nextp
 
     def put_runnable(self, env: TaskLocalEnv):
         with GuardSpinLock(env.cv, self):
@@ -178,8 +180,9 @@ class Scheduler(System):
         self.drive(env, "self", "_schedule")
 
     def _schedule(self, env: TaskLocalEnv):
-        next_runnable = self.drive(env, "proc_table", "pick_runnable")
-        match next_runnable:
+        next_runnable = Holder[NextRunnable]()
+        self.drive(env, "proc_table", "pick_runnable", ret=next_runnable)
+        match next_runnable.value:
             case NextRunnable.INIT_PROC | NextRunnable.CHILD_PROC:
                 self.drive(env, "self", "_switch")
             case _:
