@@ -57,22 +57,17 @@ class Proc(System):
         self.drive(env, "vm", "_mappages", pt=self.pagetable)
         # Todo: p->cwd = namei("/");
         self.state = ProcState.RUNNABLE
+        self.drive(env, "proc_table", "put_runnable", task=self)
 
     @visibility(TASKPRIVATE_CV)
     def _kexec(self, env: TaskLocalEnv):
         pass
 
 
-class NextRunnable(Enum):
-    INIT_PROC = "init_proc"
-    CHILD_PROC = "child_proc"
-    NONE = "none"
-
-
 # ProcTable only has the references of `initproc` and `childproc`.
 @dataclass
 class ProcTable(System):
-    has_runnable: bool = True
+    table: list[Proc] = field(default_factory=list, repr=False)
 
     def _mapstacks(self, env: TaskLocalEnv):
         self.drive(env, "initproc", "_mapstack")
@@ -91,59 +86,63 @@ class ProcTable(System):
     def _pick_runnable(self, env: TaskLocalEnv, **kwargs):
         requires(
             [
-                # NoRunnable
-                not self.has_runnable,
-                # HasRunnable
-                self.has_runnable,
+                # None
+                not self.table,
+                # One or More
+                len(self.table) >= 1,
             ]
         )
 
-        match self.has_runnable:
-            case False:
-                nextp = NextRunnable.NONE
-            case True:
-                nextp = NextRunnable.INIT_PROC
+        match self.table:
+            case []:
+                nextp = None
+            case [head, *_]:
+                nextp = head
+                self.table.pop(0)
 
         ensures(
             [
-                # NoRunnable -> NoRunnable
+                # None -> None
                 [
-                    (not self.has_runnable) and nextp is NextRunnable.NONE,
+                    (not self.table) and nextp is None
                 ],
-                # HasRunnable -> NoRunnable | HasRunnable
+                # OneOrMore -> None | OneOrMore
                 [
-                    (not self.has_runnable) and nextp is NextRunnable.INIT_PROC,
-                    self.has_runnable and nextp is NextRunnable.INIT_PROC,
+                    (not self.table) and nextp is not None,
+                    len(self.table) >= 1 and nextp is not None,
                 ],
             ]
         )
 
         kwargs["ret"].value = nextp
 
-    def put_runnable(self, env: TaskLocalEnv):
+    def put_runnable(self, env: TaskLocalEnv, **kwargs):
         with GuardSpinLock(env.cv, self):
-            self.drive(env, "self", "_put_runnable")
+            self.drive(env, "self", "_put_runnable", **kwargs)
 
     # Note: BlackBox
-    def _put_runnable(self, env: TaskLocalEnv):
+    def _put_runnable(self, env: TaskLocalEnv, **kwargs):
         requires(
             [
-                # NoRunnable
-                not self.has_runnable,
-                # HasRunnable
-                self.has_runnable,
+                # None
+                not self.table,
+                # One or More
+                len(self.table) >= 1,
             ]
         )
 
-        # Drives other system.actions
-        self.has_runnable = True
+        self.table.append(kwargs["task"])
 
         ensures(
             [
-                # NoRunnable -> HasRunnable
-                [self.has_runnable],
-                # HasRunnable -> HasRunnable
-                [self.has_runnable],
+                # None -> One
+                [
+                    len(self.table) == 1,
+                ],
+                # OneOrMore -> OneOrMore
+                [
+                    len(self.table) > 1,
+                ]
             ]
         )
 
@@ -184,10 +183,10 @@ class Scheduler(System):
         self.drive(env, "self", "_schedule")
 
     def _schedule(self, env: TaskLocalEnv):
-        next_runnable = Holder[NextRunnable]()
+        next_runnable = Holder[Proc]()
         self.drive(env, "proc_table", "pick_runnable", ret=next_runnable)
         match next_runnable.value:
-            case NextRunnable.INIT_PROC | NextRunnable.CHILD_PROC:
-                self.drive(env, "self", "_switch")
-            case _:
+            case None:
                 self.drive(env, "self", "_wfi")
+            case _:
+                self.drive(env, "self", "_switch")
