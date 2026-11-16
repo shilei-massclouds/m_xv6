@@ -24,7 +24,7 @@ from kernel.proc import PidGen, Proc, ProcTable, Scheduler
 from kernel.trap import Trap
 from kernel.vm import VM, KernelPageTable
 
-MODEL_VERSION = 5
+MODEL_VERSION = 6
 
 
 @dataclass

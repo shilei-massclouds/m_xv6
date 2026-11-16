@@ -10,7 +10,7 @@ import pytest
 from framework.contention import ContentionVector
 from framework.engine import Signal, System, TaskLocalEnv
 from global_vars import GlobalVars, gv
-from kernel.proc import NextRunnable, Scheduler
+from kernel.proc import ProcState, Scheduler
 
 
 @pytest.fixture
@@ -195,12 +195,12 @@ def test_source_keyword_can_be_forwarded_to_the_action() -> None:
 
 
 @pytest.mark.parametrize("scheduler_name", ["bp_scheduler", "ap_scheduler"])
-@pytest.mark.parametrize("next_runnable", [NextRunnable.INIT_PROC, NextRunnable.NONE])
+@pytest.mark.parametrize("runnable_name", [None, "initproc", "childproc"])
 def test_scheduler_self_calls_remain_on_the_invoked_instance(
     model: Any,
     monkeypatch: pytest.MonkeyPatch,
     scheduler_name: str,
-    next_runnable: NextRunnable,
+    runnable_name: str | None,
 ) -> None:
     calls: list[tuple[Scheduler, str]] = []
 
@@ -212,7 +212,10 @@ def test_scheduler_self_calls_remain_on_the_invoked_instance(
 
     monkeypatch.setattr(Scheduler, "_switch", switch)
     monkeypatch.setattr(Scheduler, "_wfi", wfi)
-    model.proc_table.has_runnable = next_runnable is not NextRunnable.NONE
+    if runnable_name is not None:
+        proc = getattr(model, runnable_name)
+        proc.state = ProcState.RUNNABLE
+        model.proc_table.table.append(proc)
     scheduler = getattr(model, scheduler_name)
     env = TaskLocalEnv(
         cv=ContentionVector(local_irq=0, local_tasks=0, remote_irq=1, remote_tasks=1)
@@ -222,6 +225,7 @@ def test_scheduler_self_calls_remain_on_the_invoked_instance(
 
     assert len(calls) == 1
     assert calls[0][0] is scheduler
-    assert calls[0][1] == ("wfi" if next_runnable is NextRunnable.NONE else "switch")
+    assert calls[0][1] == ("wfi" if runnable_name is None else "switch")
+    assert model.proc_table.table == []
     assert env.depth == 0
     assert env.signal_queues == []

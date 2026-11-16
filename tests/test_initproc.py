@@ -47,6 +47,8 @@ def test_scheduler_saves_after_disabling_irq_before_scheduling(
     checkpoint = f"{source}_before_schedule"
     scheduler = getattr(model, f"{source}_scheduler")
     model.marker = [source]
+    model.initproc.state = ProcState.RUNNABLE
+    model.proc_table.table.append(model.initproc)
     env = TaskLocalEnv(
         cv=ContentionVector(local_irq=0, local_tasks=0, remote_irq=1, remote_tasks=1)
     )
@@ -83,6 +85,8 @@ def test_scheduler_saves_after_disabling_irq_before_scheduling(
         restored: Any = GlobalVars()
         restored.load_snapshot(path, expected_checkpoint=checkpoint)
         assert restored.marker == [source]
+        assert len(restored.proc_table.table) == 1
+        assert restored.proc_table.table[0] is restored.initproc
         assert getattr(restored, f"{source}_scheduler").state is SchedState.RUNNING
         events.append("schedule")
         model.marker.append("after snapshot")
@@ -106,6 +110,9 @@ def test_scheduler_saves_after_disabling_irq_before_scheduling(
     restored: Any = GlobalVars()
     restored.load_snapshot(path, expected_checkpoint=checkpoint)
     assert restored.marker == [source]
+    assert len(restored.proc_table.table) == 1
+    assert restored.proc_table.table[0] is restored.initproc
+    assert len(model.proc_table.table) == (1 if fail_schedule else 0)
     assert getattr(restored, f"{source}_scheduler").state is SchedState.RUNNING
     assert set(snapshot_paths.SNAPSHOT_DIR.iterdir()) == {path}
     assert _levels(env) == (0, 0, 1, 1)
@@ -177,6 +184,8 @@ def test_initproc_restores_the_saved_flow_and_returns_to_user_mode(
         assert model.first_proc.first is first
         assert model.initproc.state is ProcState.RUNNABLE
         assert model.childproc.state is ProcState.UNUSED
+        assert len(model.proc_table.table) == 1
+        assert model.proc_table.table[0] is model.initproc
         assert model.bp_scheduler.state is SchedState.RUNNING
         assert model.ap_scheduler.state is SchedState.RUNNING
         assert not hasattr(model, "later")
@@ -197,6 +206,8 @@ def test_initproc_restores_the_saved_flow_and_returns_to_user_mode(
         assert model.first_proc.first is False
         assert model.initproc.state is ProcState.RUNNABLE
         assert model.childproc.state is ProcState.UNUSED
+        assert len(model.proc_table.table) == 1
+        assert model.proc_table.table[0] is model.initproc
         assert model.bp_scheduler.state is SchedState.RUNNING
         assert model.ap_scheduler.state is SchedState.RUNNING
         assert env.cv is cv
@@ -271,7 +282,7 @@ def test_initproc_rejects_bad_sources_without_fallback_or_model_changes(
         old_state = vars(saved)
         del old_state["initproc_flow"]
         save_snapshot(saved, path, checkpoint=checkpoint, model_version=4)
-        assert MODEL_VERSION == 5
+        assert MODEL_VERSION > 4
     elif failure == "wrong_checkpoint":
         saved.save_snapshot(path, checkpoint=f"{other}_before_schedule")
     before_files = {

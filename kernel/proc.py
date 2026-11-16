@@ -93,19 +93,15 @@ class ProcTable(System):
             ]
         )
 
-        match self.table:
-            case []:
-                nextp = None
-            case [head, *_]:
-                nextp = head
-                self.table.pop(0)
+        if self.table:
+            nextp = self.table.pop(0)
+        else:
+            nextp = None
 
         ensures(
             [
                 # None -> None
-                [
-                    (not self.table) and nextp is None
-                ],
+                [(not self.table) and nextp is None],
                 # OneOrMore -> None | OneOrMore
                 [
                     (not self.table) and nextp is not None,
@@ -142,7 +138,7 @@ class ProcTable(System):
                 # OneOrMore -> OneOrMore
                 [
                     len(self.table) > 1,
-                ]
+                ],
             ]
         )
 

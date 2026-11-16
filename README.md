@@ -30,13 +30,15 @@ AP 直接加载 `bp_initialized.snap` 并检查快照点，文件缺失或无效
 
 `InitProcOrigin(source)` 加载所选来源的调度前快照并检查快照点，不会自动补跑 BP/AP，也不会改写来源文件。每个实例新建自己的 `TaskLocalEnv`，不使用快照内可达的环境；依次启用本地多任务和远端竞争，以 `(local_irq=0, local_tasks=1, remote_irq=1, remote_tasks=1)` 调用恢复后的 `gv.initproc_flow.start()`。`InitProcFlow` 要求入口处于内核态，通过原子检查读取并清除 `first_proc.first`；首次运行时依次调用文件系统初始化和 `initproc._kexec`，非首次运行时跳过这两步，随后通过 `userret` 切换到用户态。正常返回后竞争向量保持不变。
 
-`GlobalVars` 新增 `initproc_flow` 字段后，模型版本提升为 5，旧版本快照按不兼容处理，需重新生成。`snapshots/README.md` 随代码提交以保留目录，运行时生成文件加入忽略规则。
+`ProcTable` 现在通过 `table: list[Proc]` 保存真实进程引用。`Proc._alloc` 将进程设为 `RUNNABLE` 后，通过 `put_runnable(task=self)` 将其追加到队尾；`pick_runnable` 移除并取出队首，空队列则输出 `None`。初始化快照保留已入队的 initproc，调度完成后的队列已消费该进程；快照恢复会保持队列元素与 `gv.initproc`、`gv.childproc` 的对象身份关系。
+
+模型版本已提升为 6，拒绝包含旧 `has_runnable` 字段或 `NextRunnable` 枚举的旧快照，需重新生成。`make run` 会清理并重建全部启动快照。`snapshots/README.md` 随代码提交以保留目录，运行时生成文件加入忽略规则。
 
 `System.drive(env, "self", action, **kwargs)` 和 `System.emit(env, "self", action, **kwargs)` 将目标绑定到调用它们的 System 实例。创建 Signal 时通过 `source` 保存该实例的引用，处理时解析 `"self"`，随后按原有流程执行 `acquire`、目标方法和 `release`。其他目标名称仍通过 `gv` 路径查找。
 
 嵌套调用和 `emit` 各自记录当前调用对象。队列中的信号保留其来源对象；快照恢复时，来源引用与恢复后的对象图保持一致。
 
-动作可以通过 `structs/holder.py` 中的 `Holder[T]` 传递输出参数，其 `value` 初始为 `None`。例如，调度器创建 `Holder[NextRunnable]()`，通过 `ret=holder` 传给 `pick_runnable`；该方法将同一对象继续传给 `_pick_runnable`，由后者写入 `ret.value`。两层方法均返回 `None`，调用者在 `drive` 完成后读取 `holder.value`；`ret` 是必须显式传入的关键字参数。
+动作可以通过 `structs/holder.py` 中的 `Holder[T]` 传递输出参数，其 `value` 初始为 `None`。例如，调度器创建 `Holder[Proc]()`，通过 `ret=holder` 传给 `pick_runnable`；该方法通过 `**kwargs` 将同一对象继续传给 `_pick_runnable`，由后者写入 `kwargs["ret"].value`。两层方法均返回 `None`，调用者在 `drive` 完成后读取 `holder.value`，其值为实际出队的进程对象或 `None`；调用时需提供 `ret` 关键字参数。
 
 `@protected_by("io")` 将类或方法的保护关系关联到 `gv.io`。声明接受非空对象路径，也支持 `"holder.lock"` 这样的点号路径；方法声明覆盖类声明。每次检查时都从当前 `gv` 解析路径，因此替换对象或恢复快照后会使用当前实例。名称不存在时抛出 `AttributeError`。
 
@@ -100,7 +102,7 @@ def adjust(self, amount):
 
 入口没有成立的分支，或选中出口行没有成立的条件时，立即抛出 `ContractViolation`，未捕获时程序终止。错误消息报告调用处的文件、行号、函数/方法名和 `requires`/`ensures` 阶段，也可以通过异常的 `filename`、`lineno`、`function`、`phase` 属性读取。出口失败还报告从 0 开始的入口分支索引 `branch_index`。`python -O` 下仍然检查。
 
-入口选择保存在当前 Python 调用帧的保留局部变量 `__m_xv6_contract_state__` 中，随调用结束释放；直接调用、嵌套、递归及交错恢复的生成器各自独立。调用者在方法入口和正常出口显式放置检查，框架不自动包装方法或补跑遗漏的出口检查。BP/AP 的 `start` 检查调度器从 `RUNNING` 到 `SWITCHED` 或 `WFI`，InitProc 检查内核态到用户态，`ProcTable._pick_runnable` 按入口的 `has_runnable` 分支检查出口。
+入口选择保存在当前 Python 调用帧的保留局部变量 `__m_xv6_contract_state__` 中，随调用结束释放；直接调用、嵌套、递归及交错恢复的生成器各自独立。调用者在方法入口和正常出口显式放置检查，框架不自动包装方法或补跑遗漏的出口检查。BP/AP 的 `start` 检查调度器从 `RUNNING` 到 `SWITCHED` 或 `WFI`，InitProc 检查内核态到用户态，`ProcTable._pick_runnable` 和 `_put_runnable` 按入口队列为空或非空的分支检查出口。
 
 契约检查与快照相互独立，不隐式保存、加载或回滚状态。BP 已记录的初始化快照描述记录时刻的状态，之后的出口检查失败不会撤销或改写该文件。
 

@@ -13,7 +13,7 @@ from framework.contracts import ContractViolation, ensures, requires
 from framework.engine import System, TaskLocalEnv
 from framework.sync_primitives import LocalMultiTasks
 from global_vars import GlobalVars, gv
-from kernel.proc import NextRunnable, ProcState, SchedState, Scheduler
+from kernel.proc import Proc, ProcState, SchedState, Scheduler
 from origins.ap_init_origin import ApInitOrigin
 from origins.bp_init_origin import BpInitOrigin
 from structs.holder import Holder
@@ -292,20 +292,51 @@ def test_repeated_calls_do_not_reuse_state_after_failure_or_early_return(
 
 
 @pytest.mark.parametrize(
-    ("has_runnable", "expected"),
-    [(False, NextRunnable.NONE), (True, NextRunnable.INIT_PROC)],
+    "queued_names",
+    [(), ("initproc",), ("childproc",), ("childproc", "initproc")],
 )
 @pytest.mark.parametrize("action", ["pick_runnable", "_pick_runnable"])
 def test_pick_runnable_checks_the_corresponding_entry_and_exit_branch(
-    model: GlobalVars, has_runnable: bool, expected: NextRunnable, action: str
+    model: GlobalVars, queued_names: tuple[str, ...], action: str
 ) -> None:
-    model.proc_table.has_runnable = has_runnable
-    result = Holder[NextRunnable]()
+    queued = [getattr(model, name) for name in queued_names]
+    for proc in queued:
+        proc.state = ProcState.RUNNABLE
+    model.proc_table.table[:] = queued
+    result = Holder[Proc]()
     env = TaskLocalEnv()
 
     assert getattr(model.proc_table, action)(env, ret=result) is None
 
-    assert result.value is expected
+    assert result.value is (queued[0] if queued else None)
+    assert len(model.proc_table.table) == max(0, len(queued) - 1)
+    assert all(
+        actual is expected
+        for actual, expected in zip(model.proc_table.table, queued[1:], strict=True)
+    )
+    assert vars(env.cv) == vars(TaskLocalEnv().cv)
+    assert env.depth == 0
+    assert env.signal_queues == []
+
+
+@pytest.mark.parametrize("nonempty", [False, True])
+@pytest.mark.parametrize("action", ["put_runnable", "_put_runnable"])
+def test_put_runnable_appends_the_supplied_process(
+    model: GlobalVars, nonempty: bool, action: str
+) -> None:
+    queued = [model.initproc] if nonempty else []
+    model.proc_table.table[:] = queued
+    task = model.childproc
+    task.state = ProcState.RUNNABLE
+    env = TaskLocalEnv()
+
+    assert getattr(model.proc_table, action)(env, task=task) is None
+
+    assert len(model.proc_table.table) == len(queued) + 1
+    assert model.proc_table.table[-1] is task
+    if nonempty:
+        assert model.proc_table.table[0] is model.initproc
+    assert vars(env.cv) == vars(TaskLocalEnv().cv)
     assert env.depth == 0
     assert env.signal_queues == []
 

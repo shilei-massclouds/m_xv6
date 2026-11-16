@@ -17,7 +17,7 @@ from framework.snapshot import SnapshotCompatibilityError, SnapshotError, save_s
 from framework.sync_primitives import LocalMultiTasks
 from global_vars import MODEL_VERSION, GlobalVars, gv
 from kernel.flags import SmpStarted
-from kernel.proc import NextRunnable, Proc, ProcState, SchedState, Scheduler
+from kernel.proc import Proc, ProcState, SchedState, Scheduler
 from origins.ap_init_origin import ApInitOrigin
 from origins.bp_init_origin import BpInitOrigin
 
@@ -70,17 +70,7 @@ def _levels(env: TaskLocalEnv) -> tuple[int, ...]:
     return tuple(getattr(env.cv, domain) for domain in DOMAINS)
 
 
-@pytest.mark.parametrize(
-    ("next_runnable", "expected_state"),
-    [
-        (NextRunnable.INIT_PROC, SchedState.SWITCHED),
-        (NextRunnable.NONE, SchedState.WFI),
-    ],
-)
-def test_bp_records_initialized_state_before_scheduling(
-    model: Any, next_runnable: NextRunnable, expected_state: SchedState
-) -> None:
-    model.proc_table.has_runnable = next_runnable is not NextRunnable.NONE
+def test_bp_records_initialized_state_before_scheduling(model: Any) -> None:
     original_root = model
     original_proc = model.initproc
     assert model.initproc.state is ProcState.UNUSED
@@ -93,8 +83,9 @@ def test_bp_records_initialized_state_before_scheduling(
     assert model is original_root
     assert model.initproc is original_proc
     assert model.initproc.state is ProcState.RUNNABLE
-    assert model.bp_scheduler.state is expected_state
+    assert model.bp_scheduler.state is SchedState.SWITCHED
     assert model.ap_scheduler.state is SchedState.RUNNING
+    assert model.proc_table.table == []
     initialized = GlobalVars()
     metadata = initialized.load_snapshot(
         snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH,
@@ -106,6 +97,8 @@ def test_bp_records_initialized_state_before_scheduling(
     assert initialized.bp_scheduler.state is SchedState.RUNNING
     assert initialized.ap_scheduler.state is SchedState.RUNNING
     assert initialized.smp_started.started is True
+    assert len(initialized.proc_table.table) == 1
+    assert initialized.proc_table.table[0] is initialized.initproc
     assert set(snapshot_paths.SNAPSHOT_DIR.iterdir()) == {
         snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH,
         snapshot_paths.BP_BEFORE_SCHEDULE_SNAPSHOT_PATH,
@@ -200,24 +193,40 @@ def test_origin_instances_have_independent_local_environments(origin_type: Any) 
 
 
 @pytest.mark.parametrize(
-    ("next_runnable", "expected_state"),
+    ("runnable_name", "expected_state"),
     [
-        (NextRunnable.INIT_PROC, SchedState.SWITCHED),
-        (NextRunnable.NONE, SchedState.WFI),
+        ("initproc", SchedState.SWITCHED),
+        ("childproc", SchedState.SWITCHED),
+        (None, SchedState.WFI),
     ],
 )
 def test_ap_restores_bp_state_and_schedules_its_own_cpu(
     model: Any,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    next_runnable: NextRunnable,
+    runnable_name: str | None,
     expected_state: SchedState,
 ) -> None:
-    model.proc_table.has_runnable = next_runnable is not NextRunnable.NONE
     bp = BpInitOrigin()
     bp.start()
-    assert model.bp_scheduler.state is expected_state
+    assert model.bp_scheduler.state is SchedState.SWITCHED
     assert model.ap_scheduler.state is SchedState.RUNNING
+    # Build the selected AP input from the initialization checkpoint, before
+    # either scheduler has consumed its runnable process.
+    if runnable_name != "initproc":
+        source = GlobalVars()
+        source.load_snapshot(
+            snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH,
+            expected_checkpoint=snapshot_paths.BP_INITIALIZED_CHECKPOINT,
+        )
+        source.proc_table.table.clear()
+        if runnable_name == "childproc":
+            source.childproc.state = ProcState.RUNNABLE
+            source.proc_table.table.append(source.childproc)
+        source.save_snapshot(
+            snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH,
+            checkpoint=snapshot_paths.BP_INITIALIZED_CHECKPOINT,
+        )
     bp.env.depth = 8
     model.initproc.state = ProcState.UNUSED
     model.smp_started.started = False
@@ -234,9 +243,12 @@ def test_ap_restores_bp_state_and_schedules_its_own_cpu(
     ap.start()
 
     assert model.initproc.state is ProcState.RUNNABLE
-    assert model.childproc.state is ProcState.UNUSED
+    assert model.childproc.state is (
+        ProcState.RUNNABLE if runnable_name == "childproc" else ProcState.UNUSED
+    )
     assert model.bp_scheduler.state is SchedState.RUNNING
     assert model.ap_scheduler.state is expected_state
+    assert model.proc_table.table == []
     assert model.bp_scheduler is not model.ap_scheduler
     assert model.smp_started.started is True
     assert not hasattr(model, "later")
@@ -371,6 +383,8 @@ def test_cli_defaults_to_bp_and_accepts_explicit_bp(
     )
     assert metadata["model_version"] == MODEL_VERSION
     assert restored.initproc.state is ProcState.RUNNABLE
+    assert len(restored.proc_table.table) == 1
+    assert restored.proc_table.table[0] is restored.initproc
     assert {path.name for path in directory.glob("*.snap")} == {
         "bp_initialized.snap",
         "bp_before_schedule.snap",
@@ -452,12 +466,15 @@ def inspect_ap(self, env, **kwargs):
     assert gv.bp_scheduler.state is SchedState.RUNNING
     assert gv.ap_scheduler.state is SchedState.RUNNING
     assert gv.smp_started.started is True
+    assert len(gv.proc_table.table) == 1
+    assert gv.proc_table.table[0] is gv.initproc
     # The origin disables preemption before local multitasking is enabled.
     assert (env.cv.local_irq, env.cv.local_tasks,
             env.cv.remote_irq, env.cv.remote_tasks) == (0, -1, 1, 1)
     original_start(self, env, **kwargs)
     assert gv.bp_scheduler.state is SchedState.RUNNING
     assert gv.ap_scheduler.state is SchedState.SWITCHED
+    assert gv.proc_table.table == []
     assert (env.cv.local_irq, env.cv.local_tasks,
             env.cv.remote_irq, env.cv.remote_tasks) == (0, 0, 1, 1)
     print('AP state verified')

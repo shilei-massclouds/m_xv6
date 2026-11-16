@@ -17,8 +17,9 @@ import pytest
 from framework import snapshot
 from framework.engine import Signal, TaskLocalEnv
 from global_vars import MODEL_VERSION, GlobalVars, gv
-from kernel.proc import ProcState
+from kernel.proc import Proc, ProcState
 from origins.bp_init_origin import BpInitOrigin
+from structs.holder import Holder
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -110,6 +111,57 @@ def test_dynamic_attributes_are_restored_and_later_attributes_removed(
     assert model.initproc.extra == ("nested", 3)
     assert not hasattr(model, "later")
     assert not hasattr(model.initproc, "later")
+
+
+def test_runnable_queue_restores_process_aliases_and_fifo_order(
+    model: Any, tmp_path: Path
+) -> None:
+    model.initproc.state = ProcState.RUNNABLE
+    model.childproc.state = ProcState.RUNNABLE
+    model.proc_table.table[:] = [model.childproc, model.initproc]
+    old_child = model.childproc
+    path = tmp_path / "runnable-queue.snap"
+    model.save_snapshot(path, checkpoint="queued")
+    model.reset()
+
+    model.load_snapshot(path, expected_checkpoint="queued")
+
+    assert model.childproc is not old_child
+    assert len(model.proc_table.table) == 2
+    assert model.proc_table.table[0] is model.childproc
+    assert model.proc_table.table[1] is model.initproc
+    result = Holder[Proc]()
+    for expected in (model.childproc, model.initproc, None):
+        model.proc_table._pick_runnable(TaskLocalEnv(), ret=result)
+        assert result.value is expected
+    assert model.proc_table.table == []
+
+
+def test_version_five_proc_table_is_rejected_before_deserialization(
+    model: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = GlobalVars()
+    old_table = vars(source.proc_table)
+    del old_table["table"]
+    old_table["has_runnable"] = True
+    path = tmp_path / "version-five.snap"
+    snapshot.save_snapshot(source, path, checkpoint="old", model_version=5)
+    original_bytes = path.read_bytes()
+    current_state = vars(model)
+    model.marker = "live"
+
+    def no_deserialization(*args: Any) -> None:
+        pytest.fail("old model versions must be rejected before deserialization")
+
+    monkeypatch.setattr(snapshot, "_SnapshotUnpickler", no_deserialization)
+
+    with pytest.raises(snapshot.SnapshotCompatibilityError, match="model_version"):
+        model.load_snapshot(path, expected_checkpoint="old")
+
+    assert vars(model) is current_state
+    assert model.marker == "live"
+    assert model.proc_table.table == []
+    assert path.read_bytes() == original_bytes
 
 
 def test_aliases_cycles_and_root_references(model: Any, tmp_path: Path) -> None:
