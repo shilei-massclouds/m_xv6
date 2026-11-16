@@ -30,9 +30,11 @@ AP 直接加载 `bp_initialized.snap` 并检查快照点，文件缺失或无效
 
 `InitProcOrigin(source)` 加载所选来源的调度前快照并检查快照点，不会自动补跑 BP/AP，也不会改写来源文件。每个实例新建自己的 `TaskLocalEnv`，不使用快照内可达的环境；依次启用本地多任务和远端竞争，以 `(local_irq=0, local_tasks=1, remote_irq=1, remote_tasks=1)` 调用恢复后的 `gv.initproc_flow.start()`。`InitProcFlow` 要求入口处于内核态，通过原子检查读取并清除 `first_proc.first`；首次运行时依次调用文件系统初始化和 `initproc._kexec`，非首次运行时跳过这两步，随后通过 `userret` 切换到用户态。正常返回后竞争向量保持不变。
 
-`ProcTable` 现在通过 `table: list[Proc]` 保存真实进程引用。`Proc._alloc` 将进程设为 `RUNNABLE` 后，通过 `put_runnable(task=self)` 将其追加到队尾；`pick_runnable` 移除并取出队首，空队列则输出 `None`。初始化快照保留已入队的 initproc，调度完成后的队列已消费该进程；快照恢复会保持队列元素与 `gv.initproc`、`gv.childproc` 的对象身份关系。
+`GlobalVars.initproc` 是初始为 `None` 的可选进程引用，不预先创建进程；模型暂时没有 `childproc` 字段。BP 的 `userinit` 调用 `ProcTable._alloc` 创建进程、分配资源，并在其进入 `RUNNABLE` 状态后通过 `put_runnable(task=proc)` 入队。首次分配会设置 `gv.initproc`，后续分配创建独立进程，并保留该引用。
 
-模型版本已提升为 6，拒绝包含旧 `has_runnable` 字段或 `NextRunnable` 枚举的旧快照，需重新生成。`make run` 会清理并重建全部启动快照。`snapshots/README.md` 随代码提交以保留目录，运行时生成文件加入忽略规则。
+`ProcTable.table: list[Proc]` 保存可运行进程引用；`pick_runnable` 移除并取出队首，空队列则输出 `None`。初始化快照保留已入队的 initproc，调度完成后的队列已消费该进程。快照既支持分配前的 `initproc is None` 状态，也会保持分配后队列元素与 `gv.initproc` 的对象身份关系；额外进程可以只通过队列或其他模型对象引用。
+
+模型版本已提升为 7，旧版本快照按不兼容处理，包括预先创建 initproc 和 childproc 的版本 6，需重新生成。`make run` 会清理并重建全部启动快照。`snapshots/README.md` 随代码提交以保留目录，运行时生成文件加入忽略规则。
 
 `System.drive(env, "self", action, **kwargs)` 和 `System.emit(env, "self", action, **kwargs)` 将目标绑定到调用它们的 System 实例。创建 Signal 时通过 `source` 保存该实例的引用，处理时解析 `"self"`，随后按原有流程执行 `acquire`、目标方法和 `release`。其他目标名称仍通过 `gv` 路径查找。
 

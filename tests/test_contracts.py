@@ -292,16 +292,14 @@ def test_repeated_calls_do_not_reuse_state_after_failure_or_early_return(
 
 
 @pytest.mark.parametrize(
-    "queued_names",
-    [(), ("initproc",), ("childproc",), ("childproc", "initproc")],
+    "queue_size",
+    [0, 1, 2],
 )
 @pytest.mark.parametrize("action", ["pick_runnable", "_pick_runnable"])
 def test_pick_runnable_checks_the_corresponding_entry_and_exit_branch(
-    model: GlobalVars, queued_names: tuple[str, ...], action: str
+    model: GlobalVars, queue_size: int, action: str
 ) -> None:
-    queued = [getattr(model, name) for name in queued_names]
-    for proc in queued:
-        proc.state = ProcState.RUNNABLE
+    queued = [Proc(state=ProcState.RUNNABLE) for _ in range(queue_size)]
     model.proc_table.table[:] = queued
     result = Holder[Proc]()
     env = TaskLocalEnv()
@@ -324,10 +322,9 @@ def test_pick_runnable_checks_the_corresponding_entry_and_exit_branch(
 def test_put_runnable_appends_the_supplied_process(
     model: GlobalVars, nonempty: bool, action: str
 ) -> None:
-    queued = [model.initproc] if nonempty else []
+    queued = [Proc(state=ProcState.RUNNABLE)] if nonempty else []
     model.proc_table.table[:] = queued
-    task = model.childproc
-    task.state = ProcState.RUNNABLE
+    task = Proc(state=ProcState.RUNNABLE)
     env = TaskLocalEnv()
 
     assert getattr(model.proc_table, action)(env, task=task) is None
@@ -335,7 +332,7 @@ def test_put_runnable_appends_the_supplied_process(
     assert len(model.proc_table.table) == len(queued) + 1
     assert model.proc_table.table[-1] is task
     if nonempty:
-        assert model.proc_table.table[0] is model.initproc
+        assert model.proc_table.table[0] is queued[0]
     assert vars(env.cv) == vars(TaskLocalEnv().cv)
     assert env.depth == 0
     assert env.signal_queues == []
@@ -389,7 +386,7 @@ def test_bp_entry_failure_prevents_boot_operations(
     assert caught.value.function == "BpInitFlow.start"
     assert vars(model) is current_state
     assert model.bp_scheduler.state is state
-    assert model.initproc.pid == 0
+    assert model.initproc is None
     assert list(snapshot_paths.SNAPSHOT_DIR.iterdir()) == []
 
 
@@ -397,7 +394,7 @@ def test_bp_entry_failure_prevents_boot_operations(
 def test_ap_entry_failure_prevents_environment_changes(
     model: GlobalVars, monkeypatch: pytest.MonkeyPatch, state: SchedState
 ) -> None:
-    model.initproc.state = ProcState.RUNNABLE
+    model.initproc = Proc(state=ProcState.RUNNABLE)
     model.ap_scheduler.state = state
     env = TaskLocalEnv()
 
@@ -424,6 +421,7 @@ def test_bp_exit_failure_keeps_the_recorded_snapshot(
         assert self is model.bp_scheduler
         # Leave the scheduler RUNNING to fail the exit contract, and change
         # process state to check that the earlier snapshot stays independent.
+        assert model.initproc is not None
         model.initproc.state = ProcState.RUNNING
 
     monkeypatch.setattr(Scheduler, "schedule", schedule)
@@ -442,12 +440,14 @@ def test_bp_exit_failure_keeps_the_recorded_snapshot(
         expected_checkpoint="bp_initialized",
     )
     assert restored.bp_init_flow.hartid == 0
+    assert restored.initproc is not None
     assert restored.initproc.state is ProcState.RUNNABLE
-    assert restored.childproc.state is ProcState.UNUSED
+    assert not hasattr(restored, "childproc")
     assert restored.bp_scheduler.state is SchedState.RUNNING
     assert restored.ap_scheduler.state is SchedState.RUNNING
     assert restored.smp_started.started is True
     assert model.bp_scheduler.state is SchedState.RUNNING
+    assert model.initproc is not None
     assert model.initproc.state is ProcState.RUNNING
 
 
@@ -455,7 +455,7 @@ def test_ap_exit_failure_does_not_rewrite_the_loaded_snapshot(
     model: GlobalVars, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = GlobalVars()
-    source.initproc.state = ProcState.RUNNABLE
+    source.initproc = Proc(state=ProcState.RUNNABLE)
     source.smp_started.started = True
     path = snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH
     source.save_snapshot(path, checkpoint="bp_initialized")
@@ -464,6 +464,7 @@ def test_ap_exit_failure_does_not_rewrite_the_loaded_snapshot(
     def schedule(self: Scheduler, env: TaskLocalEnv) -> None:
         assert self is model.ap_scheduler
         # Keep the AP scheduler RUNNING so its exit contract rejects the call.
+        assert model.initproc is not None
         model.initproc.state = ProcState.RUNNING
 
     monkeypatch.setattr(Scheduler, "schedule", schedule)
@@ -477,5 +478,6 @@ def test_ap_exit_failure_does_not_rewrite_the_loaded_snapshot(
     assert origin.env.depth == 0
     assert origin.env.signal_queues == []
     assert model.ap_scheduler.state is SchedState.RUNNING
+    assert model.initproc is not None
     assert model.initproc.state is ProcState.RUNNING
     assert path.read_bytes() == saved

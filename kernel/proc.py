@@ -35,48 +35,46 @@ class Proc(System):
     pid: int = field(default=0)
     state: ProcState = field(default=ProcState.UNUSED, repr=False)
     trampoline: Page = field(default_factory=Page)
-
-    def _mapstack(self, env: TaskLocalEnv):
-        self.drive(env, "page_allocator", "_kalloc")
-        self.drive(env, "kernel_page_table", "_kvmmap")
-
-    # Early preset in procinit
-    def _preset(self, env: TaskLocalEnv):
-        pass
-
-    def _alloc(self, env: TaskLocalEnv):
-        # Todo: check that `_mapstack` has been called.
-        assert self.state == ProcState.UNUSED, (
-            "process must be unused before initialization"
-        )
-        self.pid = self.drive(env, "pidgen", "_alloc")
-        self.state = ProcState.USED
-        self.trapframe = self.drive(env, "page_allocator", "_kalloc")
-        self.pagetable = self.drive(env, "page_allocator", "_kalloc")
-        self.drive(env, "vm", "_mappages", pt=self.trampoline)
-        self.drive(env, "vm", "_mappages", pt=self.pagetable)
-        # Todo: p->cwd = namei("/");
-        self.state = ProcState.RUNNABLE
-        self.drive(env, "proc_table", "put_runnable", task=self)
+    trapframe: Page | None = field(default=None, repr=False)
+    pagetable: Page | None = field(default=None, repr=False)
 
     @visibility(TASKPRIVATE_CV)
     def _kexec(self, env: TaskLocalEnv):
         pass
 
 
-# ProcTable only has the references of `initproc` and `childproc`.
 @dataclass
 class ProcTable(System):
     table: list[Proc] = field(default_factory=list, repr=False)
 
-    def _mapstacks(self, env: TaskLocalEnv):
-        self.drive(env, "initproc", "_mapstack")
-        self.drive(env, "childproc", "_mapstack")
-
     # For procinit
     def _init(self, env: TaskLocalEnv):
-        self.drive(env, "initproc", "_preset")
-        self.drive(env, "childproc", "_preset")
+        pass
+
+    def _mapstacks(self, env: TaskLocalEnv):
+        # Todo: preserve kernel pgtables according to number of procs
+        self.drive(env, "page_allocator", "_kalloc")
+        self.drive(env, "kernel_page_table", "_kvmmap")
+
+    def _alloc(self, env: TaskLocalEnv):
+        from global_vars import gv
+
+        # Todo: check that `_mapstacks` has been called.
+        proc = Proc()
+        assert proc.state == ProcState.UNUSED, (
+            "process must be unused before initialization"
+        )
+        proc.pid = self.drive(env, "pidgen", "_alloc")
+        proc.state = ProcState.USED
+        proc.trapframe = self.drive(env, "page_allocator", "_kalloc")
+        proc.pagetable = self.drive(env, "page_allocator", "_kalloc")
+        self.drive(env, "vm", "_mappages", pt=proc.trampoline)
+        self.drive(env, "vm", "_mappages", pt=proc.pagetable)
+        # Todo: p->cwd = namei("/");
+        proc.state = ProcState.RUNNABLE
+        self.drive(env, "proc_table", "put_runnable", task=proc)
+        if gv.initproc is None:
+            gv.initproc = proc
 
     def pick_runnable(self, env: TaskLocalEnv, **kwargs):
         with GuardSpinLock(env.cv, self):

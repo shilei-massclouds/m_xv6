@@ -76,7 +76,7 @@ def test_boot_state_and_header_round_trip(model: Any, tmp_path: Path) -> None:
     assert before <= created_at <= after
 
     model.reset()
-    assert model.initproc.state is ProcState.UNUSED
+    assert model.initproc is None
     loaded = model.load_snapshot(path, expected_checkpoint="已初始化")
 
     assert loaded == saved
@@ -84,13 +84,31 @@ def test_boot_state_and_header_round_trip(model: Any, tmp_path: Path) -> None:
     assert model.initproc is not original_proc
     assert model.initproc.state is ProcState.RUNNABLE
     assert model.initproc.pid == 42
-    assert model.childproc.state is ProcState.UNUSED
+    assert not hasattr(model, "childproc")
+
+
+def test_snapshot_before_allocation_preserves_an_empty_initproc_reference(
+    model: Any, tmp_path: Path
+) -> None:
+    assert model.initproc is None
+    path = tmp_path / "before-allocation.snap"
+    model.save_snapshot(path, checkpoint="before_allocation")
+    model.proc_table._alloc(TaskLocalEnv())
+    assert model.initproc is not None
+
+    model.load_snapshot(path, expected_checkpoint="before_allocation")
+
+    assert model.initproc is None
+    assert model.proc_table.table == []
+    assert not hasattr(model, "childproc")
 
 
 def test_dynamic_attributes_are_restored_and_later_attributes_removed(
     model: Any, tmp_path: Path
 ) -> None:
     path = tmp_path / "dynamic.snap"
+    proc: Any = Proc()
+    model.initproc = proc
     model.marker = {
         "sequence": [1, 2],
         "states": {ProcState.UNUSED, ProcState.RUNNABLE},
@@ -116,36 +134,43 @@ def test_dynamic_attributes_are_restored_and_later_attributes_removed(
 def test_runnable_queue_restores_process_aliases_and_fifo_order(
     model: Any, tmp_path: Path
 ) -> None:
-    model.initproc.state = ProcState.RUNNABLE
-    model.childproc.state = ProcState.RUNNABLE
-    model.proc_table.table[:] = [model.childproc, model.initproc]
-    old_child = model.childproc
+    model.proc_table._alloc(TaskLocalEnv())
+    model.proc_table._alloc(TaskLocalEnv())
+    old_later_proc = model.proc_table.table[1]
+    # Place the later allocation first to distinguish FIFO from initproc lookup.
+    model.proc_table.table.reverse()
     path = tmp_path / "runnable-queue.snap"
     model.save_snapshot(path, checkpoint="queued")
     model.reset()
 
     model.load_snapshot(path, expected_checkpoint="queued")
 
-    assert model.childproc is not old_child
+    assert not hasattr(model, "childproc")
     assert len(model.proc_table.table) == 2
-    assert model.proc_table.table[0] is model.childproc
+    later_proc = model.proc_table.table[0]
+    assert later_proc is not old_later_proc
+    assert later_proc is not model.initproc
     assert model.proc_table.table[1] is model.initproc
     result = Holder[Proc]()
-    for expected in (model.childproc, model.initproc, None):
+    for expected in (later_proc, model.initproc, None):
         model.proc_table._pick_runnable(TaskLocalEnv(), ret=result)
         assert result.value is expected
     assert model.proc_table.table == []
 
 
-def test_version_five_proc_table_is_rejected_before_deserialization(
-    model: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("old_version", [5, 6])
+def test_precreated_process_models_are_rejected_before_deserialization(
+    model: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, old_version: int
 ) -> None:
     source = GlobalVars()
-    old_table = vars(source.proc_table)
-    del old_table["table"]
-    old_table["has_runnable"] = True
-    path = tmp_path / "version-five.snap"
-    snapshot.save_snapshot(source, path, checkpoint="old", model_version=5)
+    source.initproc = Proc()
+    vars(source)["childproc"] = Proc()
+    if old_version == 5:
+        old_table = vars(source.proc_table)
+        del old_table["table"]
+        old_table["has_runnable"] = True
+    path = tmp_path / f"version-{old_version}.snap"
+    snapshot.save_snapshot(source, path, checkpoint="old", model_version=old_version)
     original_bytes = path.read_bytes()
     current_state = vars(model)
     model.marker = "live"
@@ -161,19 +186,24 @@ def test_version_five_proc_table_is_rejected_before_deserialization(
     assert vars(model) is current_state
     assert model.marker == "live"
     assert model.proc_table.table == []
+    assert model.initproc is None
+    assert not hasattr(model, "childproc")
     assert path.read_bytes() == original_bytes
 
 
 def test_aliases_cycles_and_root_references(model: Any, tmp_path: Path) -> None:
     path = tmp_path / "graph.snap"
+    proc: Any = Proc()
+    model.initproc = proc
+    peer: Any = Proc()
     shared: list[object] = []
     shared.extend([shared, model, model.initproc])
     model.shared = shared
     model.alias = {"same": shared, "root": model, "attrs": vars(model)}
     model.self = model
     model.initproc.owner = model
-    model.initproc.peer = model.childproc
-    model.childproc.peer = model.initproc
+    model.initproc.peer = peer
+    peer.peer = model.initproc
     model.save_snapshot(path, checkpoint="graph")
 
     model.load_snapshot(path)
@@ -186,12 +216,14 @@ def test_aliases_cycles_and_root_references(model: Any, tmp_path: Path) -> None:
     assert model.shared[2] is model.initproc
     assert model.alias["attrs"] is model.__dict__
     assert model.initproc.owner is model
-    assert model.initproc.peer is model.childproc
-    assert model.childproc.peer is model.initproc
+    assert model.initproc.peer is not peer
+    assert model.initproc.peer.peer is model.initproc
+    assert not hasattr(model, "childproc")
 
 
 def test_environment_queues_and_protection_aliases(model: Any, tmp_path: Path) -> None:
     path = tmp_path / "environment.snap"
+    model.initproc = Proc()
     env = TaskLocalEnv()
     queue: deque[Signal] = deque()
     env.signal_queues.append(queue)
@@ -199,7 +231,7 @@ def test_environment_queues_and_protection_aliases(model: Any, tmp_path: Path) -
         Signal(
             source=model.bp_init_flow,
             target="initproc",
-            action="_preset",
+            action="_kexec",
             args={"root": model},
             env=env,
             queue=queue,
@@ -209,7 +241,7 @@ def test_environment_queues_and_protection_aliases(model: Any, tmp_path: Path) -
         Signal(
             source=model.initproc,
             target="self",
-            action="_preset",
+            action="_kexec",
             args={},
             env=env,
             queue=queue,
@@ -242,10 +274,12 @@ def test_bound_methods_keep_their_function_owner_and_aliases(
     model: Any, tmp_path: Path
 ) -> None:
     path = tmp_path / "methods.snap"
+    proc: Any = Proc()
+    model.initproc = proc
     model.marker = "root"
     model.initproc.marker = "process"
     model.root_method = model.reset
-    model.proc_method = model.initproc._preset
+    model.proc_method = model.initproc._kexec
     model.dynamic_method = MethodType(_marker, model)
     model.initproc.dynamic_method = MethodType(_marker, model.initproc)
     model.method_alias = model.dynamic_method
@@ -257,7 +291,7 @@ def test_bound_methods_keep_their_function_owner_and_aliases(
     assert model.root_method.__self__ is model
     assert model.root_method.__func__ is GlobalVars.reset
     assert model.proc_method.__self__ is model.initproc
-    assert model.proc_method.__func__ is type(model.initproc)._preset
+    assert model.proc_method.__func__ is type(model.initproc)._kexec
     assert model.dynamic_method is model.method_alias
     assert model.dynamic_method() == "root"
     assert model.initproc.dynamic_method() == "process"
@@ -313,13 +347,17 @@ def test_snapshot_loads_in_a_fresh_process(tmp_path: Path) -> None:
             """
 import sys
 from global_vars import gv
+from framework.engine import TaskLocalEnv
 from kernel.proc import ProcState
-gv.initproc.state = ProcState.RUNNABLE
+assert gv.initproc is None
+assert not hasattr(gv, 'childproc')
+gv.proc_table._alloc(TaskLocalEnv())
+assert gv.initproc.state is ProcState.RUNNABLE
 gv.initproc.pid = 73
 gv.shared = [gv.initproc, gv]
 gv.alias = gv.shared
 gv.root_method = gv.reset
-gv.proc_method = gv.initproc._preset
+gv.proc_method = gv.initproc._kexec
 gv.save_snapshot(sys.argv[1], checkpoint='process')
 """,
             str(path),
@@ -340,13 +378,15 @@ from global_vars import gv
 from kernel.proc import ProcState
 original_root = gv
 original_proc = gv.initproc
-assert gv.initproc.state is ProcState.UNUSED
+assert gv.initproc is None
 metadata = gv.load_snapshot(sys.argv[1], expected_checkpoint='process')
 assert metadata['checkpoint'] == 'process'
 assert gv is original_root
 assert gv.initproc is not original_proc
 assert gv.initproc.state is ProcState.RUNNABLE
 assert gv.initproc.pid == 73
+assert not hasattr(gv, 'childproc')
+assert gv.proc_table.table[0] is gv.initproc
 assert gv.shared is gv.alias
 assert gv.shared[0] is gv.initproc
 assert gv.shared[1] is gv

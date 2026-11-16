@@ -24,7 +24,7 @@ from kernel.proc import PidGen, Proc, ProcTable, Scheduler
 from kernel.trap import Trap
 from kernel.vm import VM, KernelPageTable
 
-MODEL_VERSION = 6
+MODEL_VERSION = 7
 
 
 @dataclass
@@ -50,8 +50,7 @@ class GlobalVars:
     itable: InodeTable = field(default_factory=InodeTable)
     ftable: FileTable = field(default_factory=FileTable)
     vdisk: VirtIODisk = field(default_factory=VirtIODisk)
-    initproc: Proc = field(default_factory=Proc)
-    childproc: Proc = field(default_factory=Proc)
+    initproc: Proc | None = None
     pidgen: PidGen = field(default_factory=PidGen)
     smp_started: SmpStarted = field(default_factory=SmpStarted)
     first_proc: FirstProc = field(default_factory=FirstProc)

@@ -10,7 +10,7 @@ import pytest
 from framework.contention import ContentionVector
 from framework.engine import Signal, System, TaskLocalEnv
 from global_vars import GlobalVars, gv
-from kernel.proc import ProcState, Scheduler
+from kernel.proc import Proc, ProcState, Scheduler
 
 
 @pytest.fixture
@@ -195,7 +195,7 @@ def test_source_keyword_can_be_forwarded_to_the_action() -> None:
 
 
 @pytest.mark.parametrize("scheduler_name", ["bp_scheduler", "ap_scheduler"])
-@pytest.mark.parametrize("runnable_name", [None, "initproc", "childproc"])
+@pytest.mark.parametrize("runnable_name", [None, "initproc", "allocated"])
 def test_scheduler_self_calls_remain_on_the_invoked_instance(
     model: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -213,8 +213,9 @@ def test_scheduler_self_calls_remain_on_the_invoked_instance(
     monkeypatch.setattr(Scheduler, "_switch", switch)
     monkeypatch.setattr(Scheduler, "_wfi", wfi)
     if runnable_name is not None:
-        proc = getattr(model, runnable_name)
-        proc.state = ProcState.RUNNABLE
+        proc = Proc(state=ProcState.RUNNABLE)
+        if runnable_name == "initproc":
+            model.initproc = proc
         model.proc_table.table.append(proc)
     scheduler = getattr(model, scheduler_name)
     env = TaskLocalEnv(

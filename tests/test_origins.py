@@ -17,7 +17,7 @@ from framework.snapshot import SnapshotCompatibilityError, SnapshotError, save_s
 from framework.sync_primitives import LocalMultiTasks
 from global_vars import MODEL_VERSION, GlobalVars, gv
 from kernel.flags import SmpStarted
-from kernel.proc import Proc, ProcState, SchedState, Scheduler
+from kernel.proc import Proc, ProcState, ProcTable, SchedState, Scheduler
 from origins.ap_init_origin import ApInitOrigin
 from origins.bp_init_origin import BpInitOrigin
 
@@ -72,16 +72,15 @@ def _levels(env: TaskLocalEnv) -> tuple[int, ...]:
 
 def test_bp_records_initialized_state_before_scheduling(model: Any) -> None:
     original_root = model
-    original_proc = model.initproc
-    assert model.initproc.state is ProcState.UNUSED
-    assert model.childproc.state is ProcState.UNUSED
+    assert model.initproc is None
+    assert not hasattr(model, "childproc")
     assert model.bp_init_flow.hartid == 0
     assert model.ap_init_flow.hartid == 1
 
     BpInitOrigin().start()
 
     assert model is original_root
-    assert model.initproc is original_proc
+    assert model.initproc is not None
     assert model.initproc.state is ProcState.RUNNABLE
     assert model.bp_scheduler.state is SchedState.SWITCHED
     assert model.ap_scheduler.state is SchedState.RUNNING
@@ -92,8 +91,9 @@ def test_bp_records_initialized_state_before_scheduling(model: Any) -> None:
         expected_checkpoint="bp_initialized",
     )
     assert metadata["model_version"] == MODEL_VERSION
+    assert initialized.initproc is not None
     assert initialized.initproc.state is ProcState.RUNNABLE
-    assert initialized.childproc.state is ProcState.UNUSED
+    assert not hasattr(initialized, "childproc")
     assert initialized.bp_scheduler.state is SchedState.RUNNING
     assert initialized.ap_scheduler.state is SchedState.RUNNING
     assert initialized.smp_started.started is True
@@ -111,12 +111,15 @@ def test_bp_snapshot_is_recorded_after_notification_even_when_scheduler_fails(
     origin = BpInitOrigin()
     events: list[str] = []
     original_save = GlobalVars.save_snapshot
-    original_init = Proc._alloc
+    original_init = ProcTable._alloc
     original_enable = LocalMultiTasks.enable
     original_notify = SmpStarted.notify
 
-    def init(self: Proc, env: TaskLocalEnv) -> None:
+    def init(self: ProcTable, env: TaskLocalEnv) -> None:
+        assert model.initproc is None
         original_init(self, env)
+        assert model.initproc is not None
+        assert self.table[0] is model.initproc
         events.append("initproc initialized")
 
     def save(self: GlobalVars, path: Any, *, checkpoint: str) -> Any:
@@ -148,7 +151,7 @@ def test_bp_snapshot_is_recorded_after_notification_even_when_scheduler_fails(
         events.append("schedule")
         raise RuntimeError("scheduler stopped")
 
-    monkeypatch.setattr(Proc, "_alloc", init)
+    monkeypatch.setattr(ProcTable, "_alloc", init)
     monkeypatch.setattr(GlobalVars, "save_snapshot", save)
     monkeypatch.setattr(LocalMultiTasks, "enable", enable)
     monkeypatch.setattr(SmpStarted, "notify", notify)
@@ -169,8 +172,9 @@ def test_bp_snapshot_is_recorded_after_notification_even_when_scheduler_fails(
         snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH,
         expected_checkpoint="bp_initialized",
     )
+    assert restored.initproc is not None
     assert restored.initproc.state is ProcState.RUNNABLE
-    assert restored.childproc.state is ProcState.UNUSED
+    assert not hasattr(restored, "childproc")
     assert restored.smp_started.started is True
     assert origin.env.depth == 0
     assert origin.env.signal_queues == []
@@ -196,7 +200,7 @@ def test_origin_instances_have_independent_local_environments(origin_type: Any) 
     ("runnable_name", "expected_state"),
     [
         ("initproc", SchedState.SWITCHED),
-        ("childproc", SchedState.SWITCHED),
+        ("allocated", SchedState.SWITCHED),
         (None, SchedState.WFI),
     ],
 )
@@ -220,9 +224,8 @@ def test_ap_restores_bp_state_and_schedules_its_own_cpu(
             expected_checkpoint=snapshot_paths.BP_INITIALIZED_CHECKPOINT,
         )
         source.proc_table.table.clear()
-        if runnable_name == "childproc":
-            source.childproc.state = ProcState.RUNNABLE
-            source.proc_table.table.append(source.childproc)
+        if runnable_name == "allocated":
+            source.proc_table.table.append(Proc(pid=42, state=ProcState.RUNNABLE))
         source.save_snapshot(
             snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH,
             checkpoint=snapshot_paths.BP_INITIALIZED_CHECKPOINT,
@@ -243,9 +246,7 @@ def test_ap_restores_bp_state_and_schedules_its_own_cpu(
     ap.start()
 
     assert model.initproc.state is ProcState.RUNNABLE
-    assert model.childproc.state is (
-        ProcState.RUNNABLE if runnable_name == "childproc" else ProcState.UNUSED
-    )
+    assert not hasattr(model, "childproc")
     assert model.bp_scheduler.state is SchedState.RUNNING
     assert model.ap_scheduler.state is expected_state
     assert model.proc_table.table == []
@@ -273,7 +274,7 @@ def test_ap_does_not_adopt_an_environment_reachable_from_the_snapshot(
     model: Any,
 ) -> None:
     source: Any = GlobalVars()
-    source.initproc.state = ProcState.RUNNABLE
+    source.initproc = Proc(state=ProcState.RUNNABLE)
     source.smp_started.started = True
     source.bp_environment = TaskLocalEnv(depth=7)
     source.save_snapshot(
@@ -338,7 +339,7 @@ def test_ap_missing_checkpoint_does_not_create_files_or_run_bp(
 
 def test_ap_rejects_version_two_snapshot_with_old_fields(model: Any) -> None:
     source = GlobalVars()
-    source.initproc.state = ProcState.RUNNABLE
+    source.initproc = Proc(state=ProcState.RUNNABLE)
     old_state = vars(source)
     old_state["scheduler"] = old_state.pop("bp_scheduler")
     old_state["current_hart"] = old_state.pop("bp_hart")
@@ -382,6 +383,7 @@ def test_cli_defaults_to_bp_and_accepts_explicit_bp(
         initialized_path, expected_checkpoint="bp_initialized"
     )
     assert metadata["model_version"] == MODEL_VERSION
+    assert restored.initproc is not None
     assert restored.initproc.state is ProcState.RUNNABLE
     assert len(restored.proc_table.table) == 1
     assert restored.proc_table.table[0] is restored.initproc
@@ -460,8 +462,9 @@ def inspect_ap(self, env, **kwargs):
     assert gv is original_root
     assert self is gv.ap_init_flow
     assert self.hartid == 1
+    assert gv.initproc is not None
     assert gv.initproc.state is ProcState.RUNNABLE
-    assert gv.childproc.state is ProcState.UNUSED
+    assert not hasattr(gv, 'childproc')
     assert gv.bp_scheduler is not gv.ap_scheduler
     assert gv.bp_scheduler.state is SchedState.RUNNING
     assert gv.ap_scheduler.state is SchedState.RUNNING

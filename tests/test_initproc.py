@@ -15,7 +15,7 @@ from framework.engine import TaskLocalEnv
 from framework.snapshot import SnapshotError, save_snapshot
 from framework.sync_primitives import LocalIrq, LocalMultiTasks, Preemption, RemoteCpus
 from global_vars import MODEL_VERSION, GlobalVars, gv
-from kernel.proc import ProcState, SchedState, Scheduler
+from kernel.proc import Proc, ProcState, SchedState, Scheduler
 from origins.ap_init_origin import ApInitOrigin
 from origins.bp_init_origin import BpInitOrigin
 from origins.initproc_origin import InitProcOrigin
@@ -47,7 +47,7 @@ def test_scheduler_saves_after_disabling_irq_before_scheduling(
     checkpoint = f"{source}_before_schedule"
     scheduler = getattr(model, f"{source}_scheduler")
     model.marker = [source]
-    model.initproc.state = ProcState.RUNNABLE
+    model.initproc = Proc(state=ProcState.RUNNABLE)
     model.proc_table.table.append(model.initproc)
     env = TaskLocalEnv(
         cv=ContentionVector(local_irq=0, local_tasks=0, remote_irq=1, remote_tasks=1)
@@ -183,7 +183,7 @@ def test_initproc_restores_the_saved_flow_and_returns_to_user_mode(
         assert self.priv is Privilege.KERNEL
         assert model.first_proc.first is first
         assert model.initproc.state is ProcState.RUNNABLE
-        assert model.childproc.state is ProcState.UNUSED
+        assert not hasattr(model, "childproc")
         assert len(model.proc_table.table) == 1
         assert model.proc_table.table[0] is model.initproc
         assert model.bp_scheduler.state is SchedState.RUNNING
@@ -205,7 +205,7 @@ def test_initproc_restores_the_saved_flow_and_returns_to_user_mode(
         assert self.priv is Privilege.USER
         assert model.first_proc.first is False
         assert model.initproc.state is ProcState.RUNNABLE
-        assert model.childproc.state is ProcState.UNUSED
+        assert not hasattr(model, "childproc")
         assert len(model.proc_table.table) == 1
         assert model.proc_table.table[0] is model.initproc
         assert model.bp_scheduler.state is SchedState.RUNNING
