@@ -11,7 +11,9 @@ from origins import Origin
 
 @dataclass
 class ApInitOrigin(Origin):
-    env: TaskLocalEnv = field(default_factory=TaskLocalEnv, repr=False)
+    env: TaskLocalEnv = field(
+        default_factory=lambda: TaskLocalEnv(name="ap"), repr=False
+    )
 
     def start(self):
         gv.load_snapshot(

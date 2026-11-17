@@ -1,40 +1,28 @@
 # m_xv6
 
-选择 BP、AP 或 InitProc 推导入口：
+当前运行 BP 推导：
 
 ```sh
 python3 main.py
-python3 main.py bp_init_origin
-python3 main.py ap_init_origin
-python3 main.py initproc_origin --source bp
-python3 main.py initproc_origin --source ap
 ```
 
-无参数时运行 BP。位置参数接受 `bp_init_origin`、`ap_init_origin` 和 `initproc_origin`，未知名称会显示用法并退出。InitProc 必须显式提供 `--source bp` 或 `--source ap`；BP/AP 入口不接受 `--source`。
+执行 `make` 或 `make run` 会先清理快照，再运行 BP。`make clean` 清理 Python 缓存以及 `snapshots/` 下的 `*.snap`，保留该目录中的 `README.md`。
 
-执行 `make` 或 `make run` 会先清理快照，再在四个独立进程中依次运行 BP、AP、来源为 BP 的 InitProc 和来源为 AP 的 InitProc。`make clean` 清理 Python 缓存以及 `snapshots/` 下的 `*.snap`，保留该目录中的 `README.md`。
+快照由 `framework/engine.py` 中的 `Signal.handle()` 自动保存。通过 `drive` 或 `emit` 调用的 action 名称以 `_` 开头时，在方法正常返回并完成 `release` 后保存 `gv`；公开 action 本身不保存，其内部调用的私有 action 仍会保存。框架内部直接调用的辅助方法不属于 action 边界。业务代码不再手动调用保存接口。
 
-启动快照路径集中定义在 `framework/snapshot_paths.py`，固定相对于仓库根目录，与当前工作目录无关：
+`TaskLocalEnv` 必须提供当前 Flow 的 `name`，BP Origin 创建 `TaskLocalEnv(name="bp")`。同一 Flow 的嵌套调用和排队信号共享环境，按方法实际返回的顺序分配位置序号；每个环境的 `snapshot_position` 从 0 开始，成功保存后加 1。`snapshot_branch` 当前默认为 0，预留给后续执行分支机制，与契约的入口分支索引无关。
 
-| 文件 | 快照点 | 用途 |
-| --- | --- | --- |
-| `snapshots/bp_initialized.snap` | `bp_initialized` | `initproc` 初始化并通知其他 hart 后、启用本地多任务和调用调度器前的模型状态 |
-| `snapshots/bp_before_schedule.snap` | `bp_before_schedule` | BP 调度器关闭本地 IRQ 后、进入 `_schedule` 前的模型状态，供 InitProc 的 BP 来源使用 |
-| `snapshots/ap_before_schedule.snap` | `ap_before_schedule` | AP 调度器关闭本地 IRQ 后、进入 `_schedule` 前的模型状态，供 InitProc 的 AP 来源使用 |
+文件名为 `<flow>_<位置序号>.<分支序号>.snap`，文件头的 checkpoint 为不含扩展名的同名字符串。例如 BP 依次生成 `bp_0.0.snap`、`bp_1.0.snap` 等。路径由 `framework/snapshot_paths.py` 生成，固定相对于仓库根目录，与当前工作目录无关；Flow 名称必须是非空 Python 标识符，两个序号必须是非负整数。
 
-每次运行 `main.py` 都在新进程中创建默认的 `gv`，BP 从这些默认值开始推导。BP Flow 在上述记录点显式保存 `bp_initialized.snap`，然后继续原有流程。
+方法或 `release` 抛出异常时不保存本次快照，也不消耗序号；此前已完成调用的快照仍保留。`StepPoint` 同样按异常退出处理。保存失败会向上传播异常，保持序号和已有文件不变，不回滚方法已经产生的模型修改。
 
-`Scheduler.schedule()` 在 `LocalIrq().disable(env.cv)` 之后、调用 `_schedule` 之前，通过与 `gv.bp_scheduler`、`gv.ap_scheduler` 的实例身份比较识别来源，分别保存对应快照。保存后继续调度，随后调度失败也不会撤销已保存的文件。AP 保留已有 BP 快照。
-
-AP 直接加载 `bp_initialized.snap` 并检查快照点，文件缺失或无效时会报错，需要先单独运行 BP。AP 不会重新执行 BP。每个 Origin 实例通过 `default_factory` 创建自己的 `TaskLocalEnv`，按一次推导使用；新建 Origin 不会重置 `gv`。`ApInitFlow` 默认 hart 为 1。AP Origin 从全零竞争向量开始，禁止抢占并启用远端竞争后，以 `(local_irq=0, local_tasks=-1, remote_irq=1, remote_tasks=1)` 进入 AP Flow。BP 通知其他 hart 和保存 `bp_initialized.snap` 时也使用这一向量；两条 Flow 都在调用各自调度器前启用本地多任务，此时向量变为 `(0,0,1,1)`。
-
-`InitProcOrigin(source)` 加载所选来源的调度前快照并检查快照点，不会自动补跑 BP/AP，也不会改写来源文件。每个实例新建自己的 `TaskLocalEnv`，不使用快照内可达的环境；依次启用本地多任务和远端竞争，以 `(local_irq=0, local_tasks=1, remote_irq=1, remote_tasks=1)` 调用恢复后的 `gv.initproc_flow.start()`。`InitProcFlow` 要求入口处于内核态，通过原子检查读取并清除 `first_proc.first`；首次运行时依次调用文件系统初始化和 `initproc._kexec`，非首次运行时跳过这两步，随后通过 `userret` 切换到用户态。正常返回后竞争向量保持不变。
+每次运行 `main.py` 都在新进程中创建默认的 `gv`，BP 从这些默认值开始推导。每个 Origin 实例独立创建环境，按一次推导使用；新建 Origin 不会重置 `gv`。AP、InitProc 的旧加载入口尚未接入自动快照，当前不由 `main.py` 运行；原有手动快照文件不再生成。
 
 `GlobalVars.initproc` 是初始为 `None` 的可选进程引用，不预先创建进程；模型暂时没有 `childproc` 字段。BP 的 `userinit` 调用 `ProcTable._alloc` 创建进程、分配资源，并在其进入 `RUNNABLE` 状态后通过 `put_runnable(task=proc)` 入队。首次分配会设置 `gv.initproc`，后续分配创建独立进程，并保留该引用。
 
-`ProcTable.table: list[Proc]` 保存可运行进程引用；`pick_runnable` 移除并取出队首，空队列则输出 `None`。初始化快照保留已入队的 initproc，调度完成后的队列已消费该进程。快照既支持分配前的 `initproc is None` 状态，也会保持分配后队列元素与 `gv.initproc` 的对象身份关系；额外进程可以只通过队列或其他模型对象引用。
+`ProcTable.table: list[Proc]` 保存可运行进程引用；`pick_runnable` 移除并取出队首，空队列则输出 `None`。快照既支持分配前的 `initproc is None` 状态，也会保持分配后队列元素与 `gv.initproc` 的对象身份关系；额外进程可以只通过队列或其他模型对象引用。
 
-模型版本已提升为 7，旧版本快照按不兼容处理，包括预先创建 initproc 和 childproc 的版本 6，需重新生成。`make run` 会清理并重建全部启动快照。`snapshots/README.md` 随代码提交以保留目录，运行时生成文件加入忽略规则。
+当前模型版本为 7，其他模型版本的快照按不兼容处理。`make run` 会清理并重建自动快照。`snapshots/README.md` 随代码提交以保留目录，运行时生成文件加入忽略规则。
 
 `System.drive(env, "self", action, **kwargs)` 和 `System.emit(env, "self", action, **kwargs)` 将目标绑定到调用它们的 System 实例。创建 Signal 时通过 `source` 保存该实例的引用，处理时解析 `"self"`，随后按原有流程执行 `acquire`、目标方法和 `release`。其他目标名称仍通过 `gv` 路径查找。
 
@@ -55,17 +43,12 @@ def _sync_putc(self, env):
 
 声明本身不加锁。调用者仍需通过 `GuardSpinLock(env.cv, gv.io)` 等原语建立保护；保护栈按对象身份匹配，其他同类实例不能代替 `gv.io`。每个可见竞争域仍需满足计数约束。Console 和 UART 的同步输出方法都声明由 `"io"` 保护，使 `IO.printk` 持有的实例保护能覆盖整条输出链路。
 
-通用文件快照接口也可以由调用者在需要的位置显式使用：
+可以加载已经自动生成的快照：
 
 ```python
 from global_vars import gv
 
-# 父目录需要提前创建；checkpoint 是调用者定义的非空快照点名称。
-saved = gv.save_snapshot("/tmp/state.snap", checkpoint="manual")
-
-# 可以在另一个进程中加载；两个接口均返回文件头元数据字典。
-loaded = gv.load_snapshot("/tmp/state.snap", expected_checkpoint="manual")
-assert saved == loaded
+metadata = gv.load_snapshot("snapshots/bp_0.0.snap", expected_checkpoint="bp_0.0")
 ```
 
 `expected_checkpoint` 可以省略；指定时必须与文件头一致。文件格式版本和模型版本始终检查。通用实现位于 `framework/snapshot.py`，模型版本集中定义为 `global_vars.MODEL_VERSION`；模型结构或语义发生不兼容变化时应提升模型版本。快照文件不包含 Python 类和函数的代码，跨进程加载时需有兼容且可导入的模型代码。
@@ -106,9 +89,9 @@ def adjust(self, amount):
 
 入口选择保存在当前 Python 调用帧的保留局部变量 `__m_xv6_contract_state__` 中，随调用结束释放；直接调用、嵌套、递归及交错恢复的生成器各自独立。调用者在方法入口和正常出口显式放置检查，框架不自动包装方法或补跑遗漏的出口检查。BP/AP 的 `start` 检查调度器从 `RUNNING` 到 `SWITCHED` 或 `WFI`，InitProc 检查内核态到用户态，`ProcTable._pick_runnable` 和 `_put_runnable` 按入口队列为空或非空的分支检查出口。
 
-契约检查与快照相互独立，不隐式保存、加载或回滚状态。BP 已记录的初始化快照描述记录时刻的状态，之后的出口检查失败不会撤销或改写该文件。
+契约函数不保存、加载或回滚状态。action 中的契约检查失败会终止本次调用，从而跳过本次自动保存；此前已完成调用的快照不会撤销或改写。
 
-运行检查和测试（测试快照写入临时目录）：
+运行检查和测试（`tests/` 仅保障 `framework/` 的功能，测试快照写入临时目录）：
 
 ```sh
 make test

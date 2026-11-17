@@ -1,8 +1,22 @@
-"""Repository-local paths and checkpoint names used by boot origins and flows."""
+"""Repository-local paths for automatic action snapshots."""
 
 from pathlib import Path
 
 SNAPSHOT_DIR = Path(__file__).resolve().parents[1] / "snapshots"
+
+
+def snapshot_path(flow: str, position: int, branch: int = 0) -> Path:
+    """Name a completed action by flow, position and execution branch."""
+    if not flow.isidentifier():
+        raise ValueError("snapshot flow name must be a nonempty identifier")
+    if type(position) is not int or position < 0:
+        raise ValueError("snapshot position must be a nonnegative integer")
+    if type(branch) is not int or branch < 0:
+        raise ValueError("snapshot branch must be a nonnegative integer")
+    return SNAPSHOT_DIR / f"{flow}_{position}.{branch}.snap"
+
+
+# Legacy loading paths for inactive AP/InitProc origins; no longer generated.
 BP_INITIALIZED_SNAPSHOT_PATH = SNAPSHOT_DIR / "bp_initialized.snap"
 BP_BEFORE_SCHEDULE_SNAPSHOT_PATH = SNAPSHOT_DIR / "bp_before_schedule.snap"
 AP_BEFORE_SCHEDULE_SNAPSHOT_PATH = SNAPSHOT_DIR / "ap_before_schedule.snap"

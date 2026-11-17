@@ -13,7 +13,9 @@ from origins import Origin
 @dataclass
 class InitProcOrigin(Origin):
     source: Literal["bp", "ap"]
-    env: TaskLocalEnv = field(default_factory=TaskLocalEnv, repr=False)
+    env: TaskLocalEnv = field(
+        default_factory=lambda: TaskLocalEnv(name="initproc"), repr=False
+    )
 
     def start(self):
         if self.source == "bp":

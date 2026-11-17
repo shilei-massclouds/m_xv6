@@ -11,7 +11,7 @@ from drivers.virtio_disk import VirtIODisk
 from flows.ap_init_flow import ApInitFlow
 from flows.bp_init_flow import BpInitFlow
 from flows.initproc_flow import InitProcFlow
-from framework.snapshot import SnapshotMetadata, load_snapshot, save_snapshot
+from framework.snapshot import SnapshotMetadata, load_snapshot
 from fs.buffer import BufferCache
 from fs.file import FileTable
 from fs.fs import FileSystem
@@ -56,13 +56,6 @@ class GlobalVars:
 
     def reset(self):
         self.__init__()
-
-    def save_snapshot(
-        self, path: str | PathLike[str], *, checkpoint: str
-    ) -> SnapshotMetadata:
-        return save_snapshot(
-            self, path, checkpoint=checkpoint, model_version=MODEL_VERSION
-        )
 
     def load_snapshot(
         self, path: str | PathLike[str], *, expected_checkpoint: str | None = None

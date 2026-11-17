@@ -3,7 +3,6 @@
 from dataclasses import dataclass
 
 from flows import CpuFlow, CpuFlowState
-from framework import snapshot_paths
 from framework.contracts import ensures, requires
 from framework.engine import TaskLocalEnv
 from framework.sync_primitives import LocalMultiTasks, Preemption, RemoteCpus
@@ -14,8 +13,6 @@ class BpInitFlow(CpuFlow):
     hartid: int = 0
 
     def _start(self, env: TaskLocalEnv, **kwargs):
-        from global_vars import gv
-
         requires([self.state is CpuFlowState.RUNNING])
 
         self.drive(env, "console", "_init")  # consoleinit
@@ -41,11 +38,6 @@ class BpInitFlow(CpuFlow):
 
         # Notify other harts to continue.
         self.drive(env, "smp_started", "notify")
-
-        gv.save_snapshot(
-            snapshot_paths.BP_INITIALIZED_SNAPSHOT_PATH,
-            checkpoint=snapshot_paths.BP_INITIALIZED_CHECKPOINT,
-        )
 
         LocalMultiTasks().enable(env.cv)
         self.drive(env, "self", "schedule")  # scheduler

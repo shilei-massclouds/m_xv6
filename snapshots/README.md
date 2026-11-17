@@ -1,19 +1,11 @@
-# 启动快照
+# 自动快照
 
-本目录用于保存运行时快照。此说明文件随代码提交，以便检出仓库后保留目录；生成的快照及临时文件不提交。
+通过 `drive` 或 `emit` 调用的私有 action（名称以 `_` 开头）正常返回并完成 `release` 后，由 `framework/engine.py` 的 `Signal.handle()` 自动保存 `gv`。不再设置手动保存点。
 
-路径和快照点名称集中定义在 `framework/snapshot_paths.py`：
+文件名为 `<flow>_<位置序号>.<分支序号>.snap`，checkpoint 为不含扩展名的文件名。例如当前 BP 生成 `bp_0.0.snap`、`bp_1.0.snap` 等。位置序号按调用返回顺序从 0 递增，分支序号当前均为 0。嵌套调用共享环境，内层先返回时先获得序号；公开 action 本身不产生快照。
 
-| 文件 | 快照点 | 状态 |
-| --- | --- | --- |
-| `bp_initialized.snap` | `bp_initialized` | BP 完成 `initproc` 初始化并通知其他 hart 后、启用本地多任务和调用调度器前的状态 |
-| `bp_before_schedule.snap` | `bp_before_schedule` | BP 调度器关闭本地 IRQ 后、进入 `_schedule` 前的状态，供 `InitProcOrigin("bp")` 加载 |
-| `ap_before_schedule.snap` | `ap_before_schedule` | AP 调度器关闭本地 IRQ 后、进入 `_schedule` 前的状态，供 `InitProcOrigin("ap")` 加载 |
+Flow 名称来自 `TaskLocalEnv.name`，创建环境时必须显式提供；路径集中由 `framework/snapshot_paths.py` 生成。当前模型版本为 7。快照仅保存从 `gv` 可达的对象图，不包含 Python 调用栈或未从 `gv` 引用的局部环境。
 
-BP 在新进程中从 `gv` 的默认值开始推导；AP 从 `bp_initialized.snap` 开始推导，并保留已有 BP 快照。InitProc 从指定来源的调度前快照独立运行，加载失败时报错，不自动补跑 BP/AP，也不改写来源快照。当前模型版本为 7，旧快照需重新生成。
+调用或保存失败不会撤销已经生成的快照。当前只运行 BP；AP、InitProc 的旧加载入口尚未接入自动快照，旧的手动快照文件不再生成。
 
-进程按需创建，初始的 `gv.initproc` 为 `None`，模型不预先创建 childproc。`ProcTable.table` 保存可运行进程的引用，默认的初始化快照和调度前快照中包含已创建并入队的 initproc。恢复快照后，队列中的引用与恢复后的 `gv.initproc` 保持相同身份；调度从队首取出实际进程，空队列进入等待中断状态。通用快照接口也支持分配前的空引用状态。
-
-`make run` 清理快照后，依次在四个独立进程中运行 BP、AP、InitProc 来源 BP、InitProc 来源 AP。运行入口和通用快照接口参见仓库根目录的 `README.md`。
-
-`make clean` 会删除本目录下的 `*.snap`，保留此说明文件。
+`make run` 清理快照后运行 BP。`make clean` 删除本目录下的 `*.snap`，保留此说明文件。生成文件和临时文件不提交。
