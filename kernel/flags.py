@@ -2,27 +2,29 @@
 
 from dataclasses import dataclass
 
-from framework.engine import System, TaskLocalEnv
+from framework.engine import System, TaskLocalEnv, exit_from
 from framework.sync_primitives import GuardSmpAtomic
 
 
 @dataclass
 class SmpStarted(System):
-    started: bool = False
+    signaled: bool = False
 
     def notify(self, env: TaskLocalEnv):
         with GuardSmpAtomic(env.cv, self):
             self.drive(env, "self", "_notify")
 
     def _notify(self, env: TaskLocalEnv):
-        self.started = True
+        assert not self.signaled
+        self.signaled = True
 
     def wait(self, env: TaskLocalEnv):
         with GuardSmpAtomic(env.cv, self):
             self.drive(env, "self", "_wait")
 
     def _wait(self, env: TaskLocalEnv):
-        assert self.started
+        if not self.signaled:
+            exit_from("ap_xxx", "WAITING")
 
 
 @dataclass

@@ -11,4 +11,4 @@ class BpInitOrigin(Origin):
     env: TaskLocalEnv = field(default_factory=TaskLocalEnv, repr=False)
 
     def start(self):
-        self.drive(self.env, "bp_init_flow", "start")
+        self.drive(self.env, "bp_init_flow", "_start")

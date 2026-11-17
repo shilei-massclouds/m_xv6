@@ -29,6 +29,7 @@ def env_enabled(name: str) -> bool:
 
 @dataclass
 class TaskLocalEnv:
+    name: str = ""
     cv: ContentionVector = field(default_factory=ContentionVector.zeros)
     depth: int = 0
     signal_queues: list[deque[Signal]] = field(default_factory=list, repr=False)
@@ -304,8 +305,11 @@ def protected_by[T: type[System] | Callable[..., Any]](
     return decorate
 
 
-def terminate(msg: str):
-    import sys
+class StepPoint(Exception):
+    def __init__(self, point: str, state: str):
+        self.point = point
+        self.state = state
 
-    print(msg)
-    sys.exit(0)
+
+def exit_from(point: str, state: str):
+    raise StepPoint(point, state)

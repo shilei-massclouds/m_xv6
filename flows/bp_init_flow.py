@@ -2,22 +2,21 @@
 
 from dataclasses import dataclass
 
+from flows import CpuFlow, CpuFlowState
 from framework import snapshot_paths
 from framework.contracts import ensures, requires
-from framework.engine import System, TaskLocalEnv
+from framework.engine import TaskLocalEnv
 from framework.sync_primitives import LocalMultiTasks, Preemption, RemoteCpus
-from kernel.proc import SchedState
 
 
 @dataclass
-class BpInitFlow(System):
+class BpInitFlow(CpuFlow):
     hartid: int = 0
-    smp_started: bool = False
 
-    def start(self, env: TaskLocalEnv, **kwargs):
+    def _start(self, env: TaskLocalEnv, **kwargs):
         from global_vars import gv
 
-        requires([gv.bp_scheduler.state is SchedState.RUNNING])
+        requires([self.state is CpuFlowState.RUNNING])
 
         self.drive(env, "console", "_init")  # consoleinit
         self.drive(env, "io", "_init")  # printkinit
@@ -49,13 +48,13 @@ class BpInitFlow(System):
         )
 
         LocalMultiTasks().enable(env.cv)
-        self.drive(env, "bp_scheduler", "schedule")  # scheduler
+        self.drive(env, "self", "schedule")  # scheduler
 
         ensures(
             [
                 [
-                    gv.bp_scheduler.state is SchedState.SWITCHED,
-                    gv.bp_scheduler.state is SchedState.WFI,
+                    self.state is CpuFlowState.SWITCHED,
+                    self.state is CpuFlowState.WFI,
                 ]
             ]
         )

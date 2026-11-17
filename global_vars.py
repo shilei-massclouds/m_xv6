@@ -20,7 +20,7 @@ from kernel.current import CurrentHart
 from kernel.flags import FirstProc, SmpStarted
 from kernel.io import IO
 from kernel.page_allocator import PageAllocator
-from kernel.proc import PidGen, Proc, ProcTable, Scheduler
+from kernel.proc import PidGen, Proc, ProcTable
 from kernel.trap import Trap
 from kernel.vm import VM, KernelPageTable
 
@@ -40,8 +40,6 @@ class GlobalVars:
     kernel_page_table: KernelPageTable = field(default_factory=KernelPageTable)
     vm: VM = field(default_factory=VM)
     proc_table: ProcTable = field(default_factory=ProcTable)
-    bp_scheduler: Scheduler = field(default_factory=Scheduler)
-    ap_scheduler: Scheduler = field(default_factory=Scheduler)
     bp_hart: CurrentHart = field(default_factory=CurrentHart)
     ap_hart: CurrentHart = field(default_factory=CurrentHart)
     trap: Trap = field(default_factory=Trap)

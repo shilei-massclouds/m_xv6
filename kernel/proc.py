@@ -3,16 +3,11 @@
 from dataclasses import dataclass, field
 from enum import Enum
 
-from framework import snapshot_paths
-from framework.contention import CPUSCOPE_CV, TASKPRIVATE_CV
+from framework.contention import TASKPRIVATE_CV
 from framework.contracts import ensures, requires
 from framework.engine import System, TaskLocalEnv, visibility
-from framework.sync_primitives import (
-    GuardSpinLock,
-    LocalIrq,
-)
+from framework.sync_primitives import GuardSpinLock
 from kernel.page_allocator import Page
-from structs.holder import Holder
 
 
 class ProcState(Enum):
@@ -139,48 +134,3 @@ class ProcTable(System):
                 ],
             ]
         )
-
-
-class SchedState(Enum):
-    RUNNING = "running"
-    SWITCHED = "switched"
-    WFI = "wfi"
-
-
-@dataclass
-@visibility(CPUSCOPE_CV)
-class Scheduler(System):
-    state: SchedState = field(default=SchedState.RUNNING, repr=False)
-
-    def _switch(self, env: TaskLocalEnv):
-        self.state = SchedState.SWITCHED
-
-    def _wfi(self, env: TaskLocalEnv):
-        self.state = SchedState.WFI
-
-    # Todo: check it only for bp_init_flow && ap_init_flow
-    def schedule(self, env: TaskLocalEnv):
-        from global_vars import gv
-
-        LocalIrq().enable(env.cv)
-        LocalIrq().disable(env.cv)
-        if self is gv.bp_scheduler:
-            gv.save_snapshot(
-                snapshot_paths.BP_BEFORE_SCHEDULE_SNAPSHOT_PATH,
-                checkpoint=snapshot_paths.BP_BEFORE_SCHEDULE_CHECKPOINT,
-            )
-        elif self is gv.ap_scheduler:
-            gv.save_snapshot(
-                snapshot_paths.AP_BEFORE_SCHEDULE_SNAPSHOT_PATH,
-                checkpoint=snapshot_paths.AP_BEFORE_SCHEDULE_CHECKPOINT,
-            )
-        self.drive(env, "self", "_schedule")
-
-    def _schedule(self, env: TaskLocalEnv):
-        next_runnable = Holder[Proc]()
-        self.drive(env, "proc_table", "pick_runnable", ret=next_runnable)
-        match next_runnable.value:
-            case None:
-                self.drive(env, "self", "_wfi")
-            case _:
-                self.drive(env, "self", "_switch")
