@@ -63,20 +63,24 @@ class Signal:
         action = getattr(system, self.action)
         system.acquire(self.env, self.action)
         try:
-            result = action(self.env, **self.args)
+            return action(self.env, **self.args)
         finally:
             system.release(self.env, self.action)
-        if self.action.startswith("_"):
-            from global_vars import MODEL_VERSION, gv
+            self._save_snapshot()
 
-            path = snapshot_paths.snapshot_path(
-                self.env.name,
-                self.env.snapshot_position,
-                self.env.snapshot_branch,
-            )
-            save_snapshot(gv, path, checkpoint=path.stem, model_version=MODEL_VERSION)
-            self.env.snapshot_position += 1
-        return result
+    def _save_snapshot(self) -> None:
+        """Capture private action exits and advance only after a successful save."""
+        if not self.action.startswith("_"):
+            return
+        from global_vars import MODEL_VERSION, gv
+
+        path = snapshot_paths.snapshot_path(
+            self.env.name,
+            self.env.snapshot_position,
+            self.env.snapshot_branch,
+        )
+        save_snapshot(gv, path, checkpoint=path.stem, model_version=MODEL_VERSION)
+        self.env.snapshot_position += 1
 
 
 @dataclass

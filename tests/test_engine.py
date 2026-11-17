@@ -95,6 +95,7 @@ def test_private_actions_snapshot_after_release(root: ExampleRoot, tmp_path: Pat
     second = read_snapshot(tmp_path, "example_1.0")
     assert (first.system.value, first.system.releases) == (3, 1)
     assert (second.system.value, second.system.releases) == (7, 2)
+    assert root.system.releases == 2
     assert first.self_ref is first
     assert second.self_ref is second
     assert env.snapshot_position == 2
@@ -170,21 +171,20 @@ def test_snapshot_names_include_execution_branch(root: ExampleRoot, tmp_path: Pa
     assert env.snapshot_branch == 2
 
 
-def test_action_failure_releases_and_does_not_consume_position(
-    root: ExampleRoot, tmp_path: Path
-):
+def test_action_failure_snapshots_after_release(root: ExampleRoot, tmp_path: Path):
     env = TaskLocalEnv(name="example")
 
     with pytest.raises(RuntimeError, match="action failed"):
         root.system.drive(env, "self", "_fail")
 
     assert root.system.releases == 1
-    assert not list(tmp_path.iterdir())
-    assert env.snapshot_position == 0
+    failed = read_snapshot(tmp_path, "example_0.0")
+    assert (failed.system.value, failed.system.releases) == (1, 1)
+    assert env.snapshot_position == 1
     assert env.depth == 0
     assert not env.signal_queues
     root.system.drive(env, "self", "_step")
-    assert read_snapshot(tmp_path, "example_0.0").system.value == 2
+    assert read_snapshot(tmp_path, "example_1.0").system.value == 2
 
 
 def test_parent_failure_preserves_completed_child_snapshot(
@@ -196,22 +196,25 @@ def test_parent_failure_preserves_completed_child_snapshot(
         root.system.drive(env, "self", "_nested_fail")
 
     assert read_snapshot(tmp_path, "example_0.0").system.value == 1
-    assert env.snapshot_position == 1
-    assert len(list(tmp_path.iterdir())) == 1
+    parent = read_snapshot(tmp_path, "example_1.0")
+    assert (parent.system.value, parent.system.releases) == (1, 2)
+    assert env.snapshot_position == 2
+    assert len(list(tmp_path.iterdir())) == 2
 
 
-def test_step_point_unwinds_without_snapshot(root: ExampleRoot, tmp_path: Path):
+def test_step_point_snapshots_after_release(root: ExampleRoot, tmp_path: Path):
     env = TaskLocalEnv(name="example")
 
     with pytest.raises(StepPoint):
         root.system.drive(env, "self", "_stop")
 
     assert root.system.releases == 1
-    assert env.snapshot_position == 0
-    assert not list(tmp_path.iterdir())
+    stopped = read_snapshot(tmp_path, "example_0.0")
+    assert (stopped.system.value, stopped.system.releases) == (0, 1)
+    assert env.snapshot_position == 1
 
 
-def test_release_failure_does_not_snapshot(root: ExampleRoot, tmp_path: Path):
+def test_release_failure_skips_snapshot(root: ExampleRoot, tmp_path: Path):
     env = TaskLocalEnv(name="example")
     root.system.fail_release = True
 
@@ -219,7 +222,10 @@ def test_release_failure_does_not_snapshot(root: ExampleRoot, tmp_path: Path):
         root.system.drive(env, "self", "_step")
 
     assert root.system.value == 1
+    assert root.system.releases == 1
     assert env.snapshot_position == 0
+    assert env.depth == 0
+    assert not env.signal_queues
     assert not list(tmp_path.iterdir())
 
 
@@ -235,9 +241,45 @@ def test_save_failure_preserves_files_and_position(root: ExampleRoot, tmp_path: 
 
     assert first_path.read_bytes() == first_bytes
     assert list(tmp_path.iterdir()) == [first_path]
+    assert root.system.releases == 2
     assert env.snapshot_position == 1
     assert env.depth == 0
     assert not env.signal_queues
     del root.unpicklable
     root.system.drive(env, "self", "_step")
     assert read_snapshot(tmp_path, "example_1.0").system.value == 3
+
+
+def test_save_failure_keeps_original_action_error_in_exception_chain(
+    root: ExampleRoot, tmp_path: Path
+):
+    env = TaskLocalEnv(name="example")
+    root.unpicklable = lambda: None
+
+    with pytest.raises(SnapshotError, match="cannot save snapshot") as error:
+        root.system.drive(env, "self", "_fail")
+
+    original: BaseException = error.value
+    while original.__context__ is not None:
+        original = original.__context__
+    assert isinstance(original, RuntimeError)
+    assert str(original) == "action failed"
+    assert root.system.releases == 1
+    assert env.snapshot_position == 0
+    assert env.depth == 0
+    assert not env.signal_queues
+    assert not list(tmp_path.iterdir())
+
+
+def test_save_failure_in_an_outer_except_still_propagates(root: ExampleRoot):
+    env = TaskLocalEnv(name="example")
+    root.unpicklable = lambda: None
+
+    try:
+        raise RuntimeError("outer error")
+    except RuntimeError:
+        with pytest.raises(SnapshotError, match="cannot save snapshot"):
+            root.system.drive(env, "self", "_step")
+
+    assert root.system.releases == 1
+    assert env.snapshot_position == 0

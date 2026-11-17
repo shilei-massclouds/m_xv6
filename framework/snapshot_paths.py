@@ -6,7 +6,7 @@ SNAPSHOT_DIR = Path(__file__).resolve().parents[1] / "snapshots"
 
 
 def snapshot_path(flow: str, position: int, branch: int = 0) -> Path:
-    """Name a completed action by flow, position and execution branch."""
+    """Name an action exit by flow, position and execution branch."""
     if not flow.isidentifier():
         raise ValueError("snapshot flow name must be a nonempty identifier")
     if type(position) is not int or position < 0:

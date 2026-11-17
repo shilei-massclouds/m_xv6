@@ -8,13 +8,13 @@ python3 main.py
 
 执行 `make` 或 `make run` 会先清理快照，再运行 BP。`make clean` 清理 Python 缓存以及 `snapshots/` 下的 `*.snap`，保留该目录中的 `README.md`。
 
-快照由 `framework/engine.py` 中的 `Signal.handle()` 自动保存。通过 `drive` 或 `emit` 调用的 action 名称以 `_` 开头时，在方法正常返回并完成 `release` 后保存 `gv`；公开 action 本身不保存，其内部调用的私有 action 仍会保存。框架内部直接调用的辅助方法不属于 action 边界。业务代码不再手动调用保存接口。
+快照由 `framework/engine.py` 中的 `Signal._save_snapshot()` 封装，在 `Signal.handle()` 的 `finally` 中先执行 `release`，成功后调用保存。通过 `drive` 或 `emit` 调用的 action 名称以 `_` 开头时，无论正常返回还是异常退出，均在 `release` 成功后尝试保存 `gv`；公开 action 本身不保存，其内部调用的私有 action 仍会保存。框架内部直接调用的辅助方法不属于 action 边界。业务代码不再手动调用保存接口。
 
-`TaskLocalEnv` 必须提供当前 Flow 的 `name`，BP Origin 创建 `TaskLocalEnv(name="bp")`。同一 Flow 的嵌套调用和排队信号共享环境，按方法实际返回的顺序分配位置序号；每个环境的 `snapshot_position` 从 0 开始，成功保存后加 1。`snapshot_branch` 当前默认为 0，预留给后续执行分支机制，与契约的入口分支索引无关。
+`TaskLocalEnv` 必须提供当前 Flow 的 `name`，BP Origin 创建 `TaskLocalEnv(name="bp")`。同一 Flow 的嵌套调用和排队信号共享环境，按方法实际退出的顺序分配位置序号；每个环境的 `snapshot_position` 从 0 开始，成功保存后加 1。`snapshot_branch` 当前默认为 0，预留给后续执行分支机制，与契约的入口分支索引无关。
 
 文件名为 `<flow>_<位置序号>.<分支序号>.snap`，文件头的 checkpoint 为不含扩展名的同名字符串。例如 BP 依次生成 `bp_0.0.snap`、`bp_1.0.snap` 等。路径由 `framework/snapshot_paths.py` 生成，固定相对于仓库根目录，与当前工作目录无关；Flow 名称必须是非空 Python 标识符，两个序号必须是非负整数。
 
-方法或 `release` 抛出异常时不保存本次快照，也不消耗序号；此前已完成调用的快照仍保留。`StepPoint` 同样按异常退出处理。保存失败会向上传播异常，保持序号和已有文件不变，不回滚方法已经产生的模型修改。
+方法异常退出（包括 `StepPoint` 和契约失败）时，只要 `release` 成功，也会保存退出现场；嵌套异常逐层退出时，各私有 action 分别处理。快照记录 `release` 后的状态。`acquire` 失败时方法尚未调用，不产生快照；`release` 失败时跳过本次保存，不消耗序号，已有快照保留。保存失败时 `release` 已完成，不消耗序号、不改写已有文件、不回滚模型修改。保存异常自然向上传播；方法本身也失败时，方法原异常保留在异常链中。
 
 每次运行 `main.py` 都在新进程中创建默认的 `gv`，BP 从这些默认值开始推导。每个 Origin 实例独立创建环境，按一次推导使用；新建 Origin 不会重置 `gv`。AP、InitProc 的旧加载入口尚未接入自动快照，当前不由 `main.py` 运行；原有手动快照文件不再生成。
 
@@ -89,7 +89,7 @@ def adjust(self, amount):
 
 入口选择保存在当前 Python 调用帧的保留局部变量 `__m_xv6_contract_state__` 中，随调用结束释放；直接调用、嵌套、递归及交错恢复的生成器各自独立。调用者在方法入口和正常出口显式放置检查，框架不自动包装方法或补跑遗漏的出口检查。BP/AP 的 `start` 检查调度器从 `RUNNING` 到 `SWITCHED` 或 `WFI`，InitProc 检查内核态到用户态，`ProcTable._pick_runnable` 和 `_put_runnable` 按入口队列为空或非空的分支检查出口。
 
-契约函数不保存、加载或回滚状态。action 中的契约检查失败会终止本次调用，从而跳过本次自动保存；此前已完成调用的快照不会撤销或改写。
+契约函数不保存、加载或回滚状态。action 中的契约检查失败会终止本次调用，私有 action 仍由 `handle()` 的 `finally` 在 `release` 成功后保存退出现场；已有快照不会撤销或改写。
 
 运行检查和测试（`tests/` 仅保障 `framework/` 的功能，测试快照写入临时目录）：
 
