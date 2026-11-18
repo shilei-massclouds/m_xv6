@@ -32,7 +32,7 @@ python3 main.py
 
 嵌套调用和 `emit` 各自记录当前调用对象。队列中的信号保留其来源对象；快照恢复时，来源引用与恢复后的对象图保持一致。
 
-spec 方法可用 `Def _pick_runnable() -> nextp:` 声明输出，调用方通过 `next_runnable = drive("proc_table", "pick_runnable")` 接收结果。BP 和 AP 共用 `CpuFlow.spec` 中的调度器，均直接使用返回值；原有 Holder 返回值桥接已移除。
+spec 方法可用 `Def _pick_runnable() -> nextp:` 声明输出，调用方通过 `next_runnable = drive("proc_table", "pick_runnable")` 接收结果。spec 禁止 `return` 和 `if`，条件分支通过多组 Requires/Actions/Ensures 表达；每个 Actions 操作必须独占一个物理行。BP 和 AP 共用 `CpuFlow.spec` 中的调度器，均直接使用返回值；原有 Holder 返回值桥接已移除。
 
 spec 中的 `ProtectedBy io` 将类型或方法的保护关系关联到 `gv.io`。声明接受非空对象路径，也支持 `holder.lock` 这样的点号路径；方法声明覆盖类型声明。每次检查时都从当前 `gv` 解析路径，因此替换对象或恢复快照后会使用当前实例。名称不存在时抛出 `AttributeError`。
 

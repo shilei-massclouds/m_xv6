@@ -233,26 +233,40 @@ def test_exception_unwinds_guards_and_nested_frames(root: SpecRoot, tmp_path: Pa
     assert not env.signal_queues
 
 
-def test_conditional_and_direct_return(root: SpecRoot, tmp_path: Path):
+@pytest.mark.parametrize("value,expected", [(0, 0), (3, 4), (-1, 0)])
+def test_pattern_matching_and_declared_outputs(
+    root: SpecRoot, tmp_path: Path, value: int, expected: int
+):
     path = write_spec(
         tmp_path,
-        "ReturnSpec",
+        "OutputSpec",
         """
-        Def start(value=0):
+        Def start(value=0) -> result:
+            Requires:
+                value == 0
             Actions:
-                if value:
-                    return drive("self", "_value", value=value)
-                else:
-                    return 0
+                result = 0
+            Ensures:
+                result == 0
 
-        Def _value(value):
+            Requires:
+                value != 0
             Actions:
-                return value + 1
+                result = drive("self", "_value", value=value)
+            Ensures:
+                result == value + 1
+
+        Def _value(value) -> result:
+            Actions:
+                result = value + 1
     """,
     )
-    root.worker = SpecRegistry([path]).model("ReturnSpec")()
-    assert System().drive(TaskLocalEnv(name="first"), "worker", "start", value=3) == 4
-    assert System().drive(TaskLocalEnv(name="second"), "worker", "start") == 0
+    root.worker = SpecRegistry([path]).model("OutputSpec")()
+    kwargs = {"value": value} if value else {}
+    assert (
+        System().drive(TaskLocalEnv(name="example"), "worker", "start", **kwargs)
+        == expected
+    )
 
 
 @pytest.mark.parametrize(
@@ -262,7 +276,7 @@ def test_conditional_and_direct_return(root: SpecRoot, tmp_path: Path):
         "Def start():\n    Actions:\n        while True:\n            pass",
         "Prop value: int\nProp value: int",
         "Def start():\n    Unknown:\n        True",
-        'Def start():\n    Actions:\n        return drive("self", "start") + 1',
+        'Def start():\n    Actions:\n        result = drive("self", "start") + 1',
     ],
 )
 def test_unsupported_syntax_reports_file(root: SpecRoot, tmp_path: Path, source: str):
@@ -272,29 +286,86 @@ def test_unsupported_syntax_reports_file(root: SpecRoot, tmp_path: Path, source:
 
 
 @pytest.mark.parametrize(
-    "return_statement,snapshot_count",
-    [("return 3", 1), ('return drive("self", "_value")', 2)],
+    "actions,match",
+    [
+        ("return", "return is unsupported"),
+        ("return 3", "return is unsupported"),
+        ('return drive("self", "value")', "return is unsupported"),
+        ("if True:\n    pass", "if is unsupported"),
+        ("result = 1 if True else 2", "if is unsupported"),
+        ("result = (\n    1 + 2\n)", "single physical line"),
+        ("result = 1 + \\\n    2", "single physical line"),
+        ('result = drive(\n    "self", "value"\n)', "single physical line"),
+        ("assert (\n    True\n)", "single physical line"),
+        ("result = 1; result += 2", "one operation per physical line"),
+        ("with GuardSpinLock(env.cv, self): pass", "one operation per physical line"),
+        (
+            "with GuardSpinLock(\n    env.cv, self\n):\n    pass",
+            "single physical line",
+        ),
+    ],
 )
-def test_return_releases_guard_before_ensures(
-    root: SpecRoot, tmp_path: Path, return_statement: str, snapshot_count: int
+def test_action_syntax_rejects_control_flow_and_non_atomic_lines(
+    tmp_path: Path, actions: str, match: str
+):
+    source = "Def start():\n    Actions:\n" + textwrap.indent(actions, "        ")
+    path = write_spec(tmp_path, "RestrictedSpec", source)
+
+    with pytest.raises(SpecError, match=match) as error:
+        parse_spec(path)
+
+    assert f"{path}:3:" in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "source,line",
+    [
+        ("Prop value: int = 1 if True else 2", 1),
+        (
+            "Def start():\n    Requires:\n        True if True else False\n    Actions:\n        pass",
+            3,
+        ),
+        (
+            "Def start():\n    Actions:\n        pass\n    Ensures:\n        True if True else False",
+            5,
+        ),
+    ],
+)
+def test_conditional_expressions_are_rejected_in_declarations_and_contracts(
+    tmp_path: Path, source: str, line: int
+):
+    path = write_spec(tmp_path, "ConditionalSpec", source)
+
+    with pytest.raises(SpecError, match="if is unsupported") as error:
+        parse_spec(path)
+
+    assert f"{path}:{line}:" in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "assignment,snapshot_count",
+    [("result = 3", 1), ('result = drive("self", "_value")', 2)],
+)
+def test_declared_output_leaves_guard_before_ensures(
+    root: SpecRoot, tmp_path: Path, assignment: str, snapshot_count: int
 ):
     path = write_spec(
         tmp_path,
-        "GuardReturnSpec",
+        "GuardOutputSpec",
         f"""
-        Def _check():
+        Def _check() -> result:
             Actions:
                 with GuardSpinLock(env.cv, self):
-                    {return_statement}
+                    {assignment}
             Ensures:
                 env.cv.local_irq == 0 and env.cv.remote_tasks == 0
 
-        Def _value():
+        Def _value() -> result:
             Actions:
-                return 3
+                result = 3
     """,
     )
-    root.worker = SpecRegistry([path]).model("GuardReturnSpec")()
+    root.worker = SpecRegistry([path]).model("GuardOutputSpec")()
     env = TaskLocalEnv(name="example")
     assert System().drive(env, "worker", "_check") == 3
     assert env.cv.local_irq == 0
@@ -360,9 +431,9 @@ def test_signal_callback_survives_snapshot_restore(root: SpecRoot, tmp_path: Pat
             Actions:
                 self.callback = callback
 
-        Def _value(value):
+        Def _value(value) -> result:
             Actions:
-                return value
+                result = value
     """,
     )
     root.worker = SpecRegistry([path]).model("CallbackSpec")()

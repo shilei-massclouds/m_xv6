@@ -1,12 +1,11 @@
 Prop first: bool = True
 
-Def check():
+Def check() -> ret:
     Actions:
         with GuardSmpAtomic(env.cv, self):
-            return drive("self", "_check")
+            ret = drive("self", "_check")
 
-Def _check():
+Def _check() -> ret:
     Actions:
         ret = self.first
         self.first = False
-        return ret

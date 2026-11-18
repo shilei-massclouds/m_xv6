@@ -9,12 +9,26 @@ Def start():
         self.priv is Privilege.KERNEL
     Actions:
         first = drive("first_proc", "check")
-        if first:
-            drive("self", "_first_init")
+        drive("self", "first_init", first=first)
         # TODO: prepare_return.
         drive("self", "userret")
     Ensures:
         self.priv is Privilege.USER
+
+Def first_init(first):
+    Requires:
+        first
+    Actions:
+        drive("self", "_first_init")
+    Ensures:
+        first
+
+    Requires:
+        not first
+    Actions:
+        pass
+    Ensures:
+        not first
 
 # TODO: record the current hart.
 Def userret():

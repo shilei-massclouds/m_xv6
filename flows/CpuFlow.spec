@@ -16,7 +16,19 @@ Def schedule():
 Def _schedule():
     Actions:
         next_runnable = drive("proc_table", "pick_runnable")
-        if next_runnable is None:
-            self.state = CpuFlowState.WFI
-        else:
-            self.state = CpuFlowState.SWITCHED
+        drive("self", "select_next", next_runnable=next_runnable)
+
+Def select_next(next_runnable):
+    Requires:
+        next_runnable is None
+    Actions:
+        self.state = CpuFlowState.WFI
+    Ensures:
+        self.state is CpuFlowState.WFI
+
+    Requires:
+        next_runnable is not None
+    Actions:
+        self.state = CpuFlowState.SWITCHED
+    Ensures:
+        self.state is CpuFlowState.SWITCHED

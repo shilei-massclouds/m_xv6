@@ -18,7 +18,7 @@ BP 和 AP 继承同一份 `CpuFlow.spec`，调度器通过 `next_runnable = driv
 
 spec 文件名是对象类型名。`Prop table: list[Proc]` 为每个实例创建独立列表；也可以使用 `Prop value: int = 0` 显式指定默认表达式。当前属性注解描述模型，不进行运行时类型检查。枚举通过 `Enum Name:` 声明；`Extends Name` 引用同一 registry 中的另一个 spec。
 
-`Def method(parameters) -> variable:` 定义方法；箭头指定正常完成 Actions 后输出的局部变量，也可以使用显式 `return expression`。命名参数支持字面量默认值；未绑定的关键字参数可以通过 `kwargs` 访问。
+`Def method(parameters) -> variable:` 定义方法；箭头指定正常完成 Actions 后输出的局部变量，所选分支必须给该变量赋值。spec 禁止 `return`，没有输出声明的方法正常完成时输出 `None`。命名参数支持字面量默认值；未绑定的关键字参数可以通过 `kwargs` 访问。
 
 方法可依次包含多组 `Requires / Actions / Ensures`：
 
@@ -26,16 +26,18 @@ spec 文件名是对象类型名。`Prop table: list[Proc]` 为每个实例创�
 - 执行所选组的 Actions，只检查该组的 Ensures；Ensures 块内表达式做 OR。条件结果必须是 bool。
 - Requires 无匹配或 Ensures 不成立时，使用现有 `ContractViolation`，报告 spec 文件、行号、方法和入口分支。
 
-Actions 当前支持赋值、属性/下标赋值、表达式语句、`assert`、`pass`、`return`、`if/else`、`with` 保护域，以及 `+=`、`-=`、`*=`。表达式采用 Python 表达式求值，spec 与原 Python 模型一样是可信程序输入。
+Actions 支持赋值、属性/下标赋值、表达式语句、`assert`、`pass`、`with` 保护域，以及 `+=`、`-=`、`*=`。每个操作必须完整写在一个物理行中，不能用括号或反斜杠跨行，也不能在同一行通过分号串联多个操作。保护域声明同样占一个物理行，内部操作各自另起一行。表达式采用 Python 表达式求值，spec 与原 Python 模型一样是可信程序输入。
 
-Signal 调用写成 `drive("target", "action", key=value)`，可直接调用、作为赋值右侧或直接返回；嵌套在其他表达式中的 drive 会在解析时拒绝。`self` 指向发出 Signal 的当前对象；其他 target 从当前 `gv` 解析。spec 不提供 emit。`Visibility CPUSCOPE_CV` 和 `ProtectedBy io` 可声明在类型或方法上，沿用现有竞争检查。
+spec 禁止 `if/else` 语句和条件表达式，分支选择通过互斥的 Requires/Actions/Ensures 组表达。如果判断依赖前一个操作或 Signal 的结果，先完成公共前缀，再将结果作为参数交给带分支的方法；不能把这个判断提前到公共前缀执行之前。`CpuFlow.select_next`、`InitProcFlow.first_init` 和 `ProcTable.set_initproc` 是现有示例。
+
+Signal 调用写成 `drive("target", "action", key=value)`，可直接调用或作为赋值右侧；嵌套在其他表达式中的 drive 会在解析时拒绝。`self` 指向发出 Signal 的当前对象；其他 target 从当前 `gv` 解析。spec 不提供 emit。`Visibility CPUSCOPE_CV` 和 `ProtectedBy io` 可声明在类型或方法上，沿用现有竞争检查。
 
 `framework/spec.py` 解析定义并注册对象类型；`framework/interpreter.py` 用循环和显式 Frame 栈推进 Actions。每个 Frame 保存当前 Signal、指令位置、局部变量、契约分支、保护域和返回值接收位置。spec 到 spec 的调用不递归进入 Python 模型方法。框架仍支持 Python Signal 目标；当前 GV 的模型对象全部来自 spec。
 
-调用顺序仍是 `acquire → Requires → Actions → Ensures → release → 自动保存`。提前 return 会先退出 Actions 中的保护域，再检查 Ensures。异常会依次清理嵌套 Frame 的保护域并执行 release；私有方法在 release 成功后保存快照，规则与现有引擎一致。
+调用顺序仍是 `acquire → Requires → Actions → Ensures → release → 自动保存`。Actions 中的保护域正常退出后检查 Ensures，再输出声明的局部变量。异常会依次清理嵌套 Frame 的保护域并执行 release；当前私有方法在 release 成功后保存快照，规则与现有引擎一致。
 
 生成的类型和回调函数注册在指定 Python 模块中，因此对象图可以沿用现有 Pickle 快照。统一导出模块为 `flows.model_specs`，新进程导入 `global_vars` 时会自动注册。模型版本保持为 9；删除未使用的 Python 模型及导出壳不改变类型路径，现有版本 9 的快照继续兼容，其他模型版本需重新生成。另一个进程加载这些对象前，必须先注册相同的 spec；spec 内容和类型定义需要兼容。
 
-目前尚未接入 I 点文件、并发 GV 输入和 base 分支调度。解释器的 Frame 状态是后续实现这些机制的基础，不代表已经实现断点恢复。
+后续 I/O 设点严格针对 spec 的 Actions 内部操作行，裸操作行和 drive 行都适用；裸操作一行是一个原子操作。方法入口/出口、Requires/Ensures、保护域进入/退出和解释器内部指令不单独触发设点，`assert` 仅检查、不设点。目前仍未接入这套逐操作的 I/O 点、记录文件、并发 GV 输入和 base 分支调度；当前快照保存继续沿用方法退出规则。解释器的 Frame 状态是后续实现这些机制的基础，不代表已经实现断点恢复。
 
 验证：`python3 -m pytest -q tests/test_spec.py`；完整检查：`make test`。测试仅保障 framework，`ProcTable.spec` 作为首个语言验证输入。

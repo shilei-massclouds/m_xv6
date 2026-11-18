@@ -30,7 +30,6 @@ class Expression:
 class Instruction:
     operation: str
     node: Any = None
-    destination: int = 0
 
 
 @dataclass
@@ -78,37 +77,54 @@ def _drive_call(node: ast.AST | None) -> bool:
     )
 
 
+def _check_control_syntax(node: ast.AST, filename: str) -> None:
+    for child in ast.walk(node):
+        if isinstance(child, (ast.If, ast.IfExp)):
+            raise SpecError(
+                f"{filename}:{child.lineno}: if is unsupported; use Requires/Actions/Ensures branches"
+            )
+        if isinstance(child, ast.Return):
+            raise SpecError(
+                f"{filename}:{child.lineno}: return is unsupported; declare an output variable with ->"
+            )
+
+
 def _compile_actions(nodes: list[ast.stmt], filename: str) -> list[Instruction]:
     instructions: list[Instruction] = []
+    statement_lines: set[int] = set()
 
     def reject_nested_drive(node: ast.AST):
         if any(_drive_call(child) for child in ast.walk(node)):
             raise SpecError(
-                f"{filename}:{getattr(node, 'lineno', 0)}: drive must be a complete statement, assignment value or return value"
+                f"{filename}:{getattr(node, 'lineno', 0)}: drive must be a complete statement or assignment value"
             )
 
     def compile_block(block: list[ast.stmt]):
         for node in block:
-            if isinstance(node, ast.If):
-                reject_nested_drive(node.test)
-                condition = len(instructions)
-                instructions.append(Instruction("if", node.test))
-                compile_block(node.body)
-                jump = len(instructions)
-                instructions.append(Instruction("jump"))
-                instructions[condition].destination = len(instructions)
-                compile_block(node.orelse)
-                instructions[jump].destination = len(instructions)
-            elif isinstance(node, ast.With):
+            _check_control_syntax(node, filename)
+            if node.lineno in statement_lines:
+                raise SpecError(
+                    f"{filename}:{node.lineno}: only one operation per physical line is allowed"
+                )
+            statement_lines.add(node.lineno)
+            if not isinstance(node, ast.With) and node.end_lineno != node.lineno:
+                raise SpecError(
+                    f"{filename}:{node.lineno}: an operation must occupy a single physical line"
+                )
+            if isinstance(node, ast.With):
                 if any(item.optional_vars is not None for item in node.items):
                     raise SpecError(f"{filename}:{node.lineno}: with/as is unsupported")
                 for item in node.items:
+                    if item.context_expr.end_lineno != node.lineno:
+                        raise SpecError(
+                            f"{filename}:{node.lineno}: a protection declaration must occupy a single physical line"
+                        )
                     reject_nested_drive(item.context_expr)
                     instructions.append(Instruction("enter", item.context_expr))
                 compile_block(node.body)
                 for _ in node.items:
                     instructions.append(Instruction("leave"))
-            elif isinstance(node, (ast.Expr, ast.Assign, ast.Return)):
+            elif isinstance(node, (ast.Expr, ast.Assign)):
                 value = node.value
                 if _drive_call(value):
                     assert isinstance(value, ast.Call)
@@ -122,10 +138,6 @@ def _compile_actions(nodes: list[ast.stmt], filename: str) -> list[Instruction]:
                             f"{filename}:{node.lineno}: chained drive assignment"
                         )
                     instructions.append(Instruction("drive", node))
-                elif isinstance(node, ast.Return):
-                    if value is not None:
-                        reject_nested_drive(value)
-                    instructions.append(Instruction("return", value))
                 else:
                     reject_nested_drive(node)
                     instructions.append(Instruction("statement", node))
@@ -164,6 +176,8 @@ def parse_spec(path: str | Path) -> Specification:
                 branch = None
                 if text.startswith("Prop "):
                     declaration = ast.parse(text[5:]).body[0]
+                    ast.increment_lineno(declaration, line - 1)
+                    _check_control_syntax(declaration, str(path))
                     if not isinstance(declaration, ast.AnnAssign) or not isinstance(
                         declaration.target, ast.Name
                     ):
@@ -278,7 +292,9 @@ def parse_spec(path: str | Path) -> Specification:
                         if value.strip() and not value.lstrip().startswith("#")
                     ]
                     for expression in expressions:
-                        ast.parse(expression.text, mode="eval")
+                        parsed_expression = ast.parse(expression.text, mode="eval")
+                        ast.increment_lineno(parsed_expression, expression.line - 1)
+                        _check_control_syntax(parsed_expression, str(path))
                     if text == "Requires:":
                         branch.requires = expressions
                     else:

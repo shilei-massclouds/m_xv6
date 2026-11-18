@@ -41,8 +41,22 @@ Def _alloc():
         # TODO: initialize cwd.
         proc.state = ProcState.RUNNABLE
         drive("self", "put_runnable", task=proc)
-        if gv.initproc is None:
-            gv.initproc = proc
+        drive("self", "set_initproc", proc=proc)
+
+Def set_initproc(proc):
+    Requires:
+        gv.initproc is None
+    Actions:
+        gv.initproc = proc
+    Ensures:
+        gv.initproc is proc
+
+    Requires:
+        gv.initproc is not None
+    Actions:
+        pass
+    Ensures:
+        gv.initproc is not None
 
 Def pick_runnable() -> nextp:
     Actions:

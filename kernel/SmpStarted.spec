@@ -16,6 +16,14 @@ Def wait():
             drive("self", "_wait")
 
 Def _wait():
+    Requires:
+        self.signaled
     Actions:
-        if not self.signaled:
-            exit_from("ap_xxx", "BUSY_CHECK")
+        pass
+    Ensures:
+        self.signaled
+
+    Requires:
+        not self.signaled
+    Actions:
+        exit_from("ap_xxx", "BUSY_CHECK")

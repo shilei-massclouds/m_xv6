@@ -33,8 +33,6 @@ class Frame:
     guards: list[Any] = field(default_factory=list)
     receiver: ast.AST | None = None
     restore_depth: int | None = None
-    result: Any = None
-    returned: bool = False
 
 
 class Interpreter:
@@ -50,7 +48,7 @@ class Interpreter:
             while self.frames:
                 frame = self.frames[-1]
                 assert frame.branch is not None
-                if frame.returned or frame.position >= len(frame.branch.instructions):
+                if frame.position >= len(frame.branch.instructions):
                     result = self._finish(frame)
                 else:
                     instruction = frame.branch.instructions[frame.position]
@@ -213,20 +211,12 @@ class Interpreter:
     def _step(self, frame: Frame, instruction):
         node = instruction.node
         match instruction.operation:
-            case "if":
-                if not self._eval(frame, node):
-                    frame.position = instruction.destination
-            case "jump":
-                frame.position = instruction.destination
             case "enter":
                 guard = self._eval(frame, node)
                 guard.__enter__()
                 frame.guards.append(guard)
             case "leave":
                 frame.guards.pop().__exit__(None, None, None)
-            case "return":
-                frame.result = None if node is None else self._eval(frame, node)
-                frame.returned = True
             case "statement":
                 self._statement(frame, node)
             case "drive":
@@ -252,15 +242,11 @@ class Interpreter:
                     frame.signal.queue,
                 )
                 receiver = node.targets[0] if isinstance(node, ast.Assign) else None
-                if isinstance(node, ast.Return):
-                    frame.returned = True
                 system = signal.source if target == "self" else _get_target_ref(target)
                 if not hasattr(getattr(system, action), "__spec_action__"):
                     value = signal.handle()
                     if receiver is not None:
                         self._assign(frame, receiver, value)
-                    elif frame.returned:
-                        frame.result = value
                 else:
                     env = signal.env
                     depth = env.depth
@@ -295,27 +281,18 @@ class Interpreter:
 
     def _finish(self, frame: Frame) -> Any:
         assert frame.branch is not None
-        # A return from inside a guarded Actions block still exits its guards
-        # before evaluating the method's postconditions.
+        # Protection scopes must be closed before checking postconditions.
         while frame.guards:
             frame.guards.pop().__exit__(None, None, None)
         if frame.branch.ensures is not None and not self._conditions(
             frame, frame.branch.ensures
         ):
             self._violation(frame, "ensures", frame.branch.ensures)
-        result = (
-            frame.result
-            if frame.returned
-            else frame.locals[frame.method.result]
-            if frame.method.result
-            else None
-        )
+        result = frame.locals[frame.method.result] if frame.method.result else None
         self.frames.pop()
         self._close(frame)
         if self.frames:
             parent = self.frames[-1]
             if frame.receiver is not None:
                 self._assign(parent, frame.receiver, result)
-            elif parent.returned:
-                parent.result = result
         return result
