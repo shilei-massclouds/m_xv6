@@ -1,7 +1,6 @@
 """Context for Global vars"""
 
 from dataclasses import dataclass, field
-from os import PathLike
 
 from drivers.console import Console
 from drivers.devsw import DevSW
@@ -11,7 +10,6 @@ from drivers.virtio_disk import VirtIODisk
 from flows.ap_init_flow import ApInitFlow
 from flows.bp_init_flow import BpInitFlow
 from flows.initproc_flow import InitProcFlow
-from framework.snapshot import SnapshotMetadata, load_snapshot
 from fs.buffer import BufferCache
 from fs.file import FileTable
 from fs.fs import FileSystem
@@ -56,16 +54,6 @@ class GlobalVars:
 
     def reset(self):
         self.__init__()
-
-    def load_snapshot(
-        self, path: str | PathLike[str], *, expected_checkpoint: str | None = None
-    ) -> SnapshotMetadata:
-        return load_snapshot(
-            self,
-            path,
-            expected_checkpoint=expected_checkpoint,
-            model_version=MODEL_VERSION,
-        )
 
 
 gv = GlobalVars()

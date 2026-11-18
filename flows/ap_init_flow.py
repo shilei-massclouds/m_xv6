@@ -34,15 +34,3 @@ class ApInitFlow(CpuFlow):
                 ]
             ]
         )
-
-    def wait_smp_enabled(self, env: TaskLocalEnv):
-        requires([self.state is CpuFlowState.WAITING])
-
-        ensures(
-            [
-                [
-                    self.state is CpuFlowState.WAITING,
-                    self.state is CpuFlowState.RUNNING,
-                ]
-            ]
-        )

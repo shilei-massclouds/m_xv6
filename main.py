@@ -1,11 +1,16 @@
 """Derive Entry"""
 
 from framework.engine import StepPoint
+from origins.ap_init_origin import ApInitOrigin
 from origins.bp_init_origin import BpInitOrigin
 
 
 def main() -> None:
-    origin = BpInitOrigin()
+    derive_line(BpInitOrigin())
+    derive_line(ApInitOrigin())
+
+
+def derive_line(origin) -> None:
     try:
         origin.start()
     except StepPoint as sp:

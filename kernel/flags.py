@@ -24,7 +24,7 @@ class SmpStarted(System):
 
     def _wait(self, env: TaskLocalEnv):
         if not self.signaled:
-            exit_from("ap_xxx", "WAITING")
+            exit_from("ap_xxx", "BUSY_CHECK")
 
 
 @dataclass
