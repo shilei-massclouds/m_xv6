@@ -1,6 +1,6 @@
 # m_xv6
 
-spec 解释器原型已加入，首个验证输入为 `kernel/ProcTable.spec`；语法、执行语义和验证方式见 [framework/SPEC.md](framework/SPEC.md)。当前停在解释器验证阶段，尚未迁移其余 Python 模型，也未接入 I 点恢复和并发输入调度。
+BP 已改为解释执行 `flows/BpInitFlow.spec`，其依赖对象也由各目录中的 spec 定义；AP Flow 暂时仍使用 Python 实现。首个验证输入为 `kernel/ProcTable.spec`；语法、执行语义和验证方式见 [framework/SPEC.md](framework/SPEC.md)。I 点恢复和并发输入调度尚未接入。
 
 当前依次运行 BP、AP 推导：
 
@@ -26,13 +26,13 @@ python3 main.py
 
 `ProcTable.table: list[Proc]` 保存可运行进程引用；`pick_runnable` 移除并取出队首，空队列则输出 `None`。快照既支持分配前的 `initproc is None` 状态，也会保持分配后队列元素与 `gv.initproc` 的对象身份关系；额外进程可以只通过队列或其他模型对象引用。
 
-当前模型版本为 7，其他模型版本的快照按不兼容处理。`make run` 会清理并重建自动快照。`snapshots/README.md` 随代码提交以保留目录，运行时生成文件加入忽略规则。
+当前模型版本为 8，BP 所需对象由 `flows/bp_specs.py` 注册并创建；其他模型版本的快照按不兼容处理，旧 Python 模型快照需重新生成。`make run` 会清理并重建自动快照。`snapshots/README.md` 随代码提交以保留目录，运行时生成文件加入忽略规则。
 
 `System.drive(env, "self", action, **kwargs)` 和 `System.emit(env, "self", action, **kwargs)` 将目标绑定到调用它们的 System 实例。创建 Signal 时通过 `source` 保存该实例的引用，处理时解析 `"self"`，随后按原有流程执行 `acquire`、目标方法和 `release`。其他目标名称仍通过 `gv` 路径查找。
 
 嵌套调用和 `emit` 各自记录当前调用对象。队列中的信号保留其来源对象；快照恢复时，来源引用与恢复后的对象图保持一致。
 
-动作可以通过 `structs/holder.py` 中的 `Holder[T]` 传递输出参数，其 `value` 初始为 `None`。例如，调度器创建 `Holder[Proc]()`，通过 `ret=holder` 传给 `pick_runnable`；该方法通过 `**kwargs` 将同一对象继续传给 `_pick_runnable`，由后者写入 `kwargs["ret"].value`。两层方法均返回 `None`，调用者在 `drive` 完成后读取 `holder.value`，其值为实际出队的进程对象或 `None`；调用时需提供 `ret` 关键字参数。
+spec 方法可用 `Def _pick_runnable() -> nextp:` 声明输出，调用方通过 `next_runnable = drive("proc_table", "pick_runnable")` 接收结果。`ProcTable.spec` 同时兼容原有 AP 调度器传入的 `ret=Holder[Proc]()`，由公开包装方法填充 `holder.value`；BP 的 spec 调度器直接使用返回值。
 
 `@protected_by("io")` 将类或方法的保护关系关联到 `gv.io`。声明接受非空对象路径，也支持 `"holder.lock"` 这样的点号路径；方法声明覆盖类声明。每次检查时都从当前 `gv` 解析路径，因此替换对象或恢复快照后会使用当前实例。名称不存在时抛出 `AttributeError`。
 

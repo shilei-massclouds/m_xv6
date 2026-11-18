@@ -2,53 +2,44 @@
 
 from dataclasses import dataclass, field
 
-from drivers.console import Console
-from drivers.devsw import DevSW
-from drivers.plic import Plic
-from drivers.uart import Uart
-from drivers.virtio_disk import VirtIODisk
 from flows.ap_init_flow import ApInitFlow
 from flows.bp_init_flow import BpInitFlow
+from flows.bp_specs import new_model
 from flows.initproc_flow import InitProcFlow
-from fs.buffer import BufferCache
-from fs.file import FileTable
+from framework.engine import System
 from fs.fs import FileSystem
-from fs.inode import InodeTable
 from kernel.current import CurrentHart
-from kernel.flags import FirstProc, SmpStarted
-from kernel.io import IO
-from kernel.page_allocator import PageAllocator
-from kernel.proc import PidGen, Proc, ProcTable
-from kernel.trap import Trap
-from kernel.vm import VM, KernelPageTable
+from kernel.flags import FirstProc
 
-MODEL_VERSION = 7
+MODEL_VERSION = 8
 
 
 @dataclass
 class GlobalVars:
-    bp_init_flow: BpInitFlow = field(default_factory=BpInitFlow)
+    bp_init_flow: System = field(default_factory=BpInitFlow)
     ap_init_flow: ApInitFlow = field(default_factory=ApInitFlow)
     initproc_flow: InitProcFlow = field(default_factory=InitProcFlow)
-    console: Console = field(default_factory=Console)
-    io: IO = field(default_factory=IO)
-    uart: Uart = field(default_factory=Uart)
-    devsw: DevSW = field(default_factory=DevSW)
-    page_allocator: PageAllocator = field(default_factory=PageAllocator)
-    kernel_page_table: KernelPageTable = field(default_factory=KernelPageTable)
-    vm: VM = field(default_factory=VM)
-    proc_table: ProcTable = field(default_factory=ProcTable)
-    bp_hart: CurrentHart = field(default_factory=CurrentHart)
+    console: System = field(default_factory=lambda: new_model("Console"))
+    io: System = field(default_factory=lambda: new_model("IO"))
+    uart: System = field(default_factory=lambda: new_model("Uart"))
+    devsw: System = field(default_factory=lambda: new_model("DevSW"))
+    page_allocator: System = field(default_factory=lambda: new_model("PageAllocator"))
+    kernel_page_table: System = field(
+        default_factory=lambda: new_model("KernelPageTable")
+    )
+    vm: System = field(default_factory=lambda: new_model("VM"))
+    proc_table: System = field(default_factory=lambda: new_model("ProcTable"))
+    bp_hart: System = field(default_factory=lambda: new_model("CurrentHart"))
     ap_hart: CurrentHart = field(default_factory=CurrentHart)
-    trap: Trap = field(default_factory=Trap)
-    plic: Plic = field(default_factory=Plic)
-    bcache: BufferCache = field(default_factory=BufferCache)
-    itable: InodeTable = field(default_factory=InodeTable)
-    ftable: FileTable = field(default_factory=FileTable)
-    vdisk: VirtIODisk = field(default_factory=VirtIODisk)
-    initproc: Proc | None = None
-    pidgen: PidGen = field(default_factory=PidGen)
-    smp_started: SmpStarted = field(default_factory=SmpStarted)
+    trap: System = field(default_factory=lambda: new_model("Trap"))
+    plic: System = field(default_factory=lambda: new_model("Plic"))
+    bcache: System = field(default_factory=lambda: new_model("BufferCache"))
+    itable: System = field(default_factory=lambda: new_model("InodeTable"))
+    ftable: System = field(default_factory=lambda: new_model("FileTable"))
+    vdisk: System = field(default_factory=lambda: new_model("VirtIODisk"))
+    initproc: System | None = None
+    pidgen: System = field(default_factory=lambda: new_model("PidGen"))
+    smp_started: System = field(default_factory=lambda: new_model("SmpStarted"))
     first_proc: FirstProc = field(default_factory=FirstProc)
     fs: FileSystem = field(default_factory=FileSystem)
 

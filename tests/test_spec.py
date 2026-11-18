@@ -330,3 +330,34 @@ def test_cyclic_inheritance_is_rejected(tmp_path: Path):
     second = write_spec(tmp_path, "SecondSpec", "Extends FirstSpec")
     with pytest.raises(SpecError, match="cyclic"):
         SpecRegistry([first, second])
+
+
+def test_signal_callback_survives_snapshot_restore(root: SpecRoot, tmp_path: Path):
+    path = write_spec(
+        tmp_path,
+        "CallbackSpec",
+        """
+        Prop callback: object | None = None
+
+        Def install():
+            Actions:
+                drive("self", "_remember", callback=self._value)
+
+        Def _remember(callback):
+            Actions:
+                self.callback = callback
+
+        Def _value(value):
+            Actions:
+                return value
+    """,
+    )
+    root.worker = SpecRegistry([path]).model("CallbackSpec")()
+    System().drive(TaskLocalEnv(name="example"), "worker", "install")
+
+    restored = SpecRoot()
+    load_snapshot(restored, tmp_path / "example_0.0.snap", model_version=1)
+
+    assert restored.worker is not root.worker
+    assert restored.worker.callback.__self__ is restored.worker
+    assert restored.worker.callback.__func__ is restored.worker._value.__func__
