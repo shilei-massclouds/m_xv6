@@ -2,9 +2,6 @@
 
 from dataclasses import dataclass, field
 
-from flows.ap_init_flow import ApInitFlow
-from flows.bp_init_flow import BpInitFlow
-from flows.initproc_flow import InitProcFlow
 from flows.model_specs import new_model
 from framework.engine import System
 
@@ -13,9 +10,9 @@ MODEL_VERSION = 9
 
 @dataclass
 class GlobalVars:
-    bp_init_flow: System = field(default_factory=BpInitFlow)
-    ap_init_flow: System = field(default_factory=ApInitFlow)
-    initproc_flow: System = field(default_factory=InitProcFlow)
+    bp_init_flow: System = field(default_factory=lambda: new_model("BpInitFlow"))
+    ap_init_flow: System = field(default_factory=lambda: new_model("ApInitFlow"))
+    initproc_flow: System = field(default_factory=lambda: new_model("InitProcFlow"))
     console: System = field(default_factory=lambda: new_model("Console"))
     io: System = field(default_factory=lambda: new_model("IO"))
     uart: System = field(default_factory=lambda: new_model("Uart"))

@@ -1,6 +1,6 @@
 # m_xv6
 
-BP、AP 和 InitProc Flow 均已改为 spec 解释执行，入口分别为 `flows/BpInitFlow.spec`、`flows/ApInitFlow.spec` 和 `flows/InitProcFlow.spec`，依赖对象也由各目录中的 spec 定义。`flows/model_specs.py` 统一注册模型，原有 Flow Python 模块仅保留类型和枚举导出。首个验证输入为 `kernel/ProcTable.spec`；语法、执行语义和验证方式见 [framework/SPEC.md](framework/SPEC.md)。I 点恢复和并发输入调度尚未接入。
+BP、AP 和 InitProc Flow 均由 spec 描述并解释执行，入口分别为 `flows/BpInitFlow.spec`、`flows/ApInitFlow.spec` 和 `flows/InitProcFlow.spec`，依赖对象也由各目录中的 spec 定义。`flows/model_specs.py` 统一注册模型，`global_vars.py` 通过 `new_model(...)` 创建 Flow 及其依赖对象。旧 Python 模型、Flow 导出壳和 Holder 已删除；解释器、框架和启动入口继续由 Python 实现。首个验证输入为 `kernel/ProcTable.spec`；语法、执行语义和验证方式见 [framework/SPEC.md](framework/SPEC.md)。I 点恢复和并发输入调度尚未接入。
 
 当前依次运行 BP、AP 推导：
 
@@ -26,7 +26,7 @@ python3 main.py
 
 `ProcTable.table: list[Proc]` 保存可运行进程引用；`pick_runnable` 移除并取出队首，空队列则输出 `None`。快照既支持分配前的 `initproc is None` 状态，也会保持分配后队列元素与 `gv.initproc` 的对象身份关系；额外进程可以只通过队列或其他模型对象引用。
 
-当前模型版本为 9，所有 Flow 及其依赖对象由 `flows/model_specs.py` 注册并创建；其他模型版本的快照按不兼容处理。AP、InitProc 类型及注册模块均已变化，旧快照需重新生成。`make run` 会清理并重建 BP、AP 自动快照。`snapshots/README.md` 随代码提交以保留目录，运行时生成文件加入忽略规则。
+当前模型版本为 9，生成类型及回调的注册模块仍为 `flows.model_specs`。清理旧 Python 模型不改变模型结构和类型路径，现有版本 9 的快照可以继续加载；其他模型版本的快照按不兼容处理。`make run` 会清理并重建 BP、AP 自动快照。`snapshots/README.md` 随代码提交以保留目录，运行时生成文件加入忽略规则。
 
 `System.drive(env, "self", action, **kwargs)` 和 `System.emit(env, "self", action, **kwargs)` 将目标绑定到调用它们的 System 实例。创建 Signal 时通过 `source` 保存该实例的引用，处理时解析 `"self"`，随后按原有流程执行 `acquire`、目标方法和 `release`。其他目标名称仍通过 `gv` 路径查找。
 
@@ -34,15 +34,13 @@ python3 main.py
 
 spec 方法可用 `Def _pick_runnable() -> nextp:` 声明输出，调用方通过 `next_runnable = drive("proc_table", "pick_runnable")` 接收结果。BP 和 AP 共用 `CpuFlow.spec` 中的调度器，均直接使用返回值；原有 Holder 返回值桥接已移除。
 
-`@protected_by("io")` 将类或方法的保护关系关联到 `gv.io`。声明接受非空对象路径，也支持 `"holder.lock"` 这样的点号路径；方法声明覆盖类声明。每次检查时都从当前 `gv` 解析路径，因此替换对象或恢复快照后会使用当前实例。名称不存在时抛出 `AttributeError`。
+spec 中的 `ProtectedBy io` 将类型或方法的保护关系关联到 `gv.io`。声明接受非空对象路径，也支持 `holder.lock` 这样的点号路径；方法声明覆盖类型声明。每次检查时都从当前 `gv` 解析路径，因此替换对象或恢复快照后会使用当前实例。名称不存在时抛出 `AttributeError`。
 
-```python
-from framework.engine import protected_by
-
-
-@protected_by("io")
-def _sync_putc(self, env):
-    self.drive(env, "uart", "putc_sync")
+```text
+Def _sync_putc():
+    ProtectedBy io
+    Actions:
+        drive("uart", "putc_sync")
 ```
 
 声明本身不加锁。调用者仍需通过 `GuardSpinLock(env.cv, gv.io)` 等原语建立保护；保护栈按对象身份匹配，其他同类实例不能代替 `gv.io`。每个可见竞争域仍需满足计数约束。Console 和 UART 的同步输出方法都声明由 `"io"` 保护，使 `IO.printk` 持有的实例保护能覆盖整条输出链路。
@@ -71,7 +69,7 @@ metadata = load_snapshot(
 
 Pickle 加载会执行代码，只加载可信来源的快照。动态属性也需支持 Pickle；局部函数、lambda、打开的文件等不受支持，保存时会明确报错。
 
-方法契约通过 `framework/contracts.py` 中的 `requires(list[bool])` 和 `ensures(list[list[bool]])` 显式检查。每次方法调用至多执行一次 `requires` 和一次 `ensures`：
+模型契约使用 spec 中的 `Requires / Actions / Ensures` 声明，由解释器检查，详见 [framework/SPEC.md](framework/SPEC.md)。框架仍保留 `framework/contracts.py` 中的 Python 契约接口：`requires(list[bool])` 和 `ensures(list[list[bool]])`。调用这些接口时，每次方法调用至多执行一次 `requires` 和一次 `ensures`：
 
 ```python
 from framework.contracts import ensures, requires

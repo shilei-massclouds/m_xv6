@@ -12,7 +12,7 @@ result = System().drive(TaskLocalEnv(name="example"), "proc_table", "_pick_runna
 assert result is None
 ```
 
-`make run` 先清理快照，再依次解释执行 BP 和 AP；InitProc 暂不接入 `main.py`。InitProc Origin 可在已有 BP 或 AP 模型上显式调用，仍复用当前 `gv`，不自动加载快照。注册入口的路径相对于仓库根目录解析，不依赖工作目录。GV 中的所有模型对象直接由 spec 创建；原有 Python Flow 模块仅保留类型和枚举导出，其余旧 Python 模型文件保留作参考。
+`make run` 先清理快照，再依次解释执行 BP 和 AP；InitProc 暂不接入 `main.py`。InitProc Origin 可在已有 BP 或 AP 模型上显式调用，仍复用当前 `gv`，不自动加载快照。注册入口的路径相对于仓库根目录解析，不依赖工作目录。GV 中的所有模型对象均通过 `flows.model_specs.new_model(...)` 创建。旧 Python 模型和 Flow 导出壳已删除；需要类型时使用 `registry.model("CpuFlow")`，需要枚举时使用 `registry.namespace["CpuFlowState"]` 等注册项。
 
 BP 和 AP 继承同一份 `CpuFlow.spec`，调度器通过 `next_runnable = drive("proc_table", "pick_runnable")` 接收 spec 返回值，不再使用 Holder 输出参数。InitProc 的首次执行检查也直接接收 `FirstProc.spec` 的布尔返回值；首次进入时调用文件系统初始化和进程 `_kexec`，最后切换到用户态。
 
@@ -30,11 +30,11 @@ Actions 当前支持赋值、属性/下标赋值、表达式语句、`assert`、
 
 Signal 调用写成 `drive("target", "action", key=value)`，可直接调用、作为赋值右侧或直接返回；嵌套在其他表达式中的 drive 会在解析时拒绝。`self` 指向发出 Signal 的当前对象；其他 target 从当前 `gv` 解析。spec 不提供 emit。`Visibility CPUSCOPE_CV` 和 `ProtectedBy io` 可声明在类型或方法上，沿用现有竞争检查。
 
-`framework/spec.py` 解析定义并注册对象类型；`framework/interpreter.py` 用循环和显式 Frame 栈推进 Actions。每个 Frame 保存当前 Signal、指令位置、局部变量、契约分支、保护域和返回值接收位置。spec 到 spec 的调用不递归进入 Python 模型方法；Python 方法目前可作为迁移期间的调用目标。
+`framework/spec.py` 解析定义并注册对象类型；`framework/interpreter.py` 用循环和显式 Frame 栈推进 Actions。每个 Frame 保存当前 Signal、指令位置、局部变量、契约分支、保护域和返回值接收位置。spec 到 spec 的调用不递归进入 Python 模型方法。框架仍支持 Python Signal 目标；当前 GV 的模型对象全部来自 spec。
 
 调用顺序仍是 `acquire → Requires → Actions → Ensures → release → 自动保存`。提前 return 会先退出 Actions 中的保护域，再检查 Ensures。异常会依次清理嵌套 Frame 的保护域并执行 release；私有方法在 release 成功后保存快照，规则与现有引擎一致。
 
-生成的类型和回调函数注册在指定 Python 模块中，因此对象图可以沿用现有 Pickle 快照。统一导出模块为 `flows.model_specs`，新进程导入 `global_vars` 时会自动注册。模型版本已升为 9，旧快照需重新生成。另一个进程加载这些对象前，必须先注册相同的 spec；spec 内容和类型定义需要兼容。
+生成的类型和回调函数注册在指定 Python 模块中，因此对象图可以沿用现有 Pickle 快照。统一导出模块为 `flows.model_specs`，新进程导入 `global_vars` 时会自动注册。模型版本保持为 9；删除未使用的 Python 模型及导出壳不改变类型路径，现有版本 9 的快照继续兼容，其他模型版本需重新生成。另一个进程加载这些对象前，必须先注册相同的 spec；spec 内容和类型定义需要兼容。
 
 目前尚未接入 I 点文件、并发 GV 输入和 base 分支调度。解释器的 Frame 状态是后续实现这些机制的基础，不代表已经实现断点恢复。
 
