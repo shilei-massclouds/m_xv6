@@ -38,7 +38,8 @@ class GlobalVars:
     fs: System = field(default_factory=lambda: new_model("FileSystem"))
 
     def reset(self):
-        self.__init__()
+        """Restore defaults, including removing dynamically added attributes."""
+        self.__dict__ = vars(type(self)())
 
 
 gv = GlobalVars()

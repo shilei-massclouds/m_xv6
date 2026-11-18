@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import inspect
 import re
 import sys
@@ -27,9 +28,16 @@ class Expression:
 
 
 @dataclass
+class ActionSite:
+    line: int
+    text: str
+
+
+@dataclass
 class Instruction:
     operation: str
     node: Any = None
+    site: ActionSite | None = None
 
 
 @dataclass
@@ -67,6 +75,7 @@ class Specification:
     enums: dict[str, dict[str, Any]] = field(default_factory=dict)
     visibility: str | None = None
     protection: str | None = None
+    fingerprint: str = ""
 
 
 def _drive_call(node: ast.AST | None) -> bool:
@@ -89,7 +98,9 @@ def _check_control_syntax(node: ast.AST, filename: str) -> None:
             )
 
 
-def _compile_actions(nodes: list[ast.stmt], filename: str) -> list[Instruction]:
+def _compile_actions(
+    nodes: list[ast.stmt], filename: str, source_lines: list[str]
+) -> list[Instruction]:
     instructions: list[Instruction] = []
     statement_lines: set[int] = set()
 
@@ -107,6 +118,7 @@ def _compile_actions(nodes: list[ast.stmt], filename: str) -> list[Instruction]:
                     f"{filename}:{node.lineno}: only one operation per physical line is allowed"
                 )
             statement_lines.add(node.lineno)
+            site = ActionSite(node.lineno, source_lines[node.lineno - 1].strip())
             if not isinstance(node, ast.With) and node.end_lineno != node.lineno:
                 raise SpecError(
                     f"{filename}:{node.lineno}: an operation must occupy a single physical line"
@@ -137,13 +149,19 @@ def _compile_actions(nodes: list[ast.stmt], filename: str) -> list[Instruction]:
                         raise SpecError(
                             f"{filename}:{node.lineno}: chained drive assignment"
                         )
-                    instructions.append(Instruction("drive", node))
+                    instructions.append(Instruction("drive", node, site))
                 else:
                     reject_nested_drive(node)
-                    instructions.append(Instruction("statement", node))
+                    instructions.append(Instruction("statement", node, site))
             elif isinstance(node, (ast.Pass, ast.Assert, ast.AugAssign, ast.AnnAssign)):
                 reject_nested_drive(node)
-                instructions.append(Instruction("statement", node))
+                instructions.append(
+                    Instruction(
+                        "statement",
+                        node,
+                        None if isinstance(node, (ast.Pass, ast.Assert)) else site,
+                    )
+                )
             else:
                 raise SpecError(
                     f"{filename}:{node.lineno}: unsupported action {type(node).__name__}"
@@ -155,8 +173,11 @@ def _compile_actions(nodes: list[ast.stmt], filename: str) -> list[Instruction]:
 
 def parse_spec(path: str | Path) -> Specification:
     path = Path(path)
-    lines = path.read_text().splitlines()
-    spec = Specification(path.stem, path)
+    source_text = path.read_text()
+    lines = source_text.splitlines()
+    spec = Specification(
+        path.stem, path, fingerprint=hashlib.sha256(source_text.encode()).hexdigest()
+    )
     method: Method | None = None
     branch: Branch | None = None
     index = 0
@@ -283,7 +304,7 @@ def parse_spec(path: str | Path) -> Specification:
                         raise SpecError("duplicate Actions section")
                     source = "\n" * start + textwrap.dedent("\n".join(content))
                     branch.instructions = _compile_actions(
-                        ast.parse(source, filename=str(path)).body, str(path)
+                        ast.parse(source, filename=str(path)).body, str(path), lines
                     )
                 else:
                     expressions = [

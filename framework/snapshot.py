@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from io import BufferedRandom
 from pathlib import Path
 from types import MethodType
-from typing import Any, BinaryIO, TypedDict, cast
+from typing import Any, BinaryIO, NotRequired, TypedDict, cast
 
 MAGIC = b"M_XV6_SNAPSHOT\n"
 FORMAT_VERSION = 1
@@ -26,6 +26,7 @@ class SnapshotMetadata(TypedDict):
     checkpoint: str
     created_at: str
     payload_sha256: str
+    input_point: NotRequired[str]
 
 
 class SnapshotError(Exception):
@@ -100,6 +101,10 @@ def _read_header(stream: BinaryIO) -> SnapshotMetadata:
     for name in ("checkpoint", "created_at", "payload_sha256"):
         if not isinstance(metadata.get(name), str) or not metadata[name]:
             raise SnapshotFormatError(f"snapshot header requires nonempty {name}")
+    if "input_point" in metadata and (
+        not isinstance(metadata["input_point"], str) or not metadata["input_point"]
+    ):
+        raise SnapshotFormatError("input_point must be a nonempty string")
     try:
         created_at = datetime.fromisoformat(metadata["created_at"])
     except ValueError as exc:
@@ -120,6 +125,7 @@ def save_snapshot(
     *,
     checkpoint: str,
     model_version: int,
+    input_point: str | None = None,
 ) -> SnapshotMetadata:
     """Save all instance attributes, committing only a fully written file.
 
@@ -128,6 +134,10 @@ def save_snapshot(
     """
     if not isinstance(checkpoint, str) or not checkpoint:
         raise ValueError("checkpoint must be a nonempty string")
+    if input_point is not None and (
+        not isinstance(input_point, str) or not input_point
+    ):
+        raise ValueError("input_point must be a nonempty string")
     path = Path(path)
     metadata: SnapshotMetadata = {
         "format_version": FORMAT_VERSION,
@@ -136,6 +146,8 @@ def save_snapshot(
         "created_at": datetime.now(UTC).isoformat(),
         "payload_sha256": "0" * 64,
     }
+    if input_point is not None:
+        metadata["input_point"] = input_point
     temporary_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(

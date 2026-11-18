@@ -9,7 +9,6 @@ from os import getenv
 from types import FunctionType
 from typing import Any, cast
 
-from framework import snapshot_paths
 from framework.contention import (
     DOMAINS,
     FULLSCOPE_CV,
@@ -17,7 +16,6 @@ from framework.contention import (
     TRANSPARENT_CV,
     ContentionVector,
 )
-from framework.snapshot import save_snapshot
 
 _VISIBILITY_ATTR = "__visibility__"
 _PROTECTED_BY_ATTR = "__protected_by__"
@@ -30,24 +28,11 @@ def env_enabled(name: str) -> bool:
 
 
 @dataclass
-class SnapshotCandidate:
-    """A snapshot selected as input for a derivation."""
-
-    name: str
-    handled: bool = False
-
-
-@dataclass
 class TaskLocalEnv:
     name: str
     cv: ContentionVector = field(default_factory=ContentionVector.zeros)
     depth: int = 0
     signal_queues: list[deque[Signal]] = field(default_factory=list, repr=False)
-    snapshot_position: int = 0
-    snapshot_branch: int = 0
-    snapshot_candidates: list[SnapshotCandidate] = field(default_factory=list)
-    # Reserved configuration; breakpoint restoration is not implemented yet.
-    range: tuple[int, int] | None = None
 
 
 def _get_target_ref(path: str) -> System:
@@ -81,21 +66,6 @@ class Signal:
             return action(self.env, **self.args)
         finally:
             system.release(self.env, self.action)
-            self._save_snapshot()
-
-    def _save_snapshot(self) -> None:
-        """Capture private action exits and advance only after a successful save."""
-        if not self.action.startswith("_"):
-            return
-        from global_vars import MODEL_VERSION, gv
-
-        path = snapshot_paths.snapshot_path(
-            self.env.name,
-            branch=self.env.snapshot_branch,
-            position=self.env.snapshot_position,
-        )
-        save_snapshot(gv, path, checkpoint=path.stem, model_version=MODEL_VERSION)
-        self.env.snapshot_position += 1
 
 
 @dataclass

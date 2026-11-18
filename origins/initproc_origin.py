@@ -1,4 +1,4 @@
-"""Start the initial process flow from a BP or AP scheduling checkpoint."""
+"""Start the initial process flow on the GV supplied by its FlowRun."""
 
 from dataclasses import dataclass, field
 from typing import Literal

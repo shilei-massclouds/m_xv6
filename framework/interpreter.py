@@ -10,6 +10,7 @@ from typing import Any
 
 from framework.contracts import ContractViolation, Phase
 from framework.engine import Signal, _get_target_ref
+from framework.flow_run import require_run
 from framework.spec import (
     Branch,
     Expression,
@@ -33,6 +34,7 @@ class Frame:
     guards: list[Any] = field(default_factory=list)
     receiver: ast.AST | None = None
     restore_depth: int | None = None
+    caller_point: str | None = None
 
 
 class Interpreter:
@@ -42,6 +44,11 @@ class Interpreter:
         self.frames: list[Frame] = []
 
     def run(self, signal: Signal) -> Any:
+        run = require_run(signal.env)
+        from global_vars import gv
+
+        if run.root is not gv:
+            raise RuntimeError("FlowRun root must be the current gv")
         try:
             self._push(signal)
             result = None
@@ -56,6 +63,7 @@ class Interpreter:
                     self._step(frame, instruction)
             return result
         except BaseException as error:
+            run.failed = True
             frames, self.frames = self.frames, []
             with ExitStack() as cleanup:
                 for frame in frames:
@@ -99,6 +107,7 @@ class Interpreter:
         signal: Signal,
         receiver: ast.AST | None = None,
         restore_depth: int | None = None,
+        caller_point: str | None = None,
     ):
         system = (
             signal.source if signal.target == "self" else _get_target_ref(signal.target)
@@ -115,6 +124,7 @@ class Interpreter:
             {},
             receiver=receiver,
             restore_depth=restore_depth,
+            caller_point=caller_point,
         )
         self.frames.append(frame)
         bound = method.signature.bind(**signal.args)
@@ -218,7 +228,27 @@ class Interpreter:
             case "leave":
                 frame.guards.pop().__exit__(None, None, None)
             case "statement":
-                self._statement(frame, node)
+                if instruction.site is None:
+                    self._statement(frame, node)
+                else:
+                    run = require_run(frame.signal.env)
+                    point = run.begin(
+                        frame.specification,
+                        frame.method.name,
+                        frame.branch_index,
+                        instruction.site,
+                        "bare",
+                        {
+                            "source": frame.system,
+                            "bindings": {
+                                name: value
+                                for name, value in frame.locals.items()
+                                if name not in {"self", "env"}
+                            },
+                        },
+                    )
+                    self._statement(frame, node)
+                    run.complete(point)
             case "drive":
                 call = node.value
                 assert isinstance(call, ast.Call)
@@ -241,12 +271,28 @@ class Interpreter:
                     frame.signal.env,
                     frame.signal.queue,
                 )
+                assert instruction.site is not None
+                run = require_run(signal.env)
+                point = run.begin(
+                    frame.specification,
+                    frame.method.name,
+                    frame.branch_index,
+                    instruction.site,
+                    "drive",
+                    {
+                        "source": signal.source,
+                        "target": target,
+                        "action": action,
+                        "args": kwargs,
+                    },
+                )
                 receiver = node.targets[0] if isinstance(node, ast.Assign) else None
                 system = signal.source if target == "self" else _get_target_ref(target)
                 if not hasattr(getattr(system, action), "__spec_action__"):
                     value = signal.handle()
                     if receiver is not None:
                         self._assign(frame, receiver, value)
+                    run.complete(point)
                 else:
                     env = signal.env
                     depth = env.depth
@@ -255,7 +301,7 @@ class Interpreter:
                     )
                     env.depth += 1
                     try:
-                        self._push(signal, receiver, depth)
+                        self._push(signal, receiver, depth, point)
                     except BaseException:
                         if not self.frames or self.frames[-1] is frame:
                             env.depth = depth
@@ -274,7 +320,6 @@ class Interpreter:
         finally:
             try:
                 frame.system.release(frame.signal.env, frame.signal.action)
-                frame.signal._save_snapshot()
             finally:
                 if frame.restore_depth is not None:
                     frame.signal.env.depth = frame.restore_depth
@@ -295,4 +340,6 @@ class Interpreter:
             parent = self.frames[-1]
             if frame.receiver is not None:
                 self._assign(parent, frame.receiver, result)
+            if frame.caller_point is not None:
+                require_run(frame.signal.env).complete(frame.caller_point)
         return result

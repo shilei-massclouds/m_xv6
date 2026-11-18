@@ -1,13 +1,15 @@
-# 自动快照
+# 首轮 I/O 记录
 
-通过 `drive` 或 `emit` 调用的私有 action（名称以 `_` 开头）退出时，无论正常返回还是抛出异常，都由 `framework/engine.py` 的 `Signal.handle()` 在 `finally` 中先执行 `release`，成功后调用封装的 `_save_snapshot()` 保存 `gv`。快照记录 `release` 后的状态。不再设置手动保存点。
+BP、AP 各自使用 `snapshots/<flow>/inputs/records.json` 保存 I 点，使用 `snapshots/<flow>/outputs/` 保存 GV 快照。两个 Flow 在运行前分别创建默认 GV 和 Env，当前只执行分支 0。
 
-文件名为 `<flow>_<分支序号>.<位置序号>.snap`，checkpoint 为不含扩展名的文件名。例如当前 BP 生成 `bp_0.0.snap`、`bp_0.1.snap`、`bp_0.2.snap` 等。位置序号按调用退出顺序从 0 递增，分支序号当前均为 0。嵌套调用共享环境，内层先退出时先获得序号；异常逐层退出时，各私有 action 在自身 `release` 成功后分别保存，公开 action 本身不产生快照。方法进入前的恢复断点与退出时的快照位置序号分别定义；旧命名文件应清理后重新生成。
+`<flow>_0.0.snap` 是初始 GV 的 O 点。I 从 `<flow>_0.0` 开始按进入顺序编号，成功操作的 O 从 `<flow>_0.1.snap` 开始按完成顺序编号。O 文件头的可选 `input_point` 关联其来源 I；初始 O 没有来源。每个 I 的 `input_snapshot` 是相对于 snapshots 根目录的路径，指向进入时最近产生的 O 点。
 
-Flow 名称来自 `TaskLocalEnv.name`，创建环境时必须显式提供；路径集中由 `framework/snapshot_paths.py` 生成。当前模型版本为 9，BP、AP 和 InitProc 模型均来自 spec，类型和回调统一注册在 `flows.model_specs` 中；新进程导入 `global_vars` 即完成注册。清理旧 Python 模型及 Flow 导出壳不改变注册模块和模型类型，版本 9 的快照继续兼容，其他模型版本需重新生成。快照仅保存从 `gv` 可达的对象图，不包含解释器 Frame 栈、Python 调用栈或未从 `gv` 引用的局部环境。
+设点只针对 spec Actions 内的裸操作行和 drive 行。裸操作执行前记录 I、成功后保存 O；drive 在 Signal 准备好后记录 I，被调用方法正常完成契约、release 及返回值赋值后保存 O。方法边界、保护域声明、内部指令、assert 和 pass 不额外设点。
 
-`TaskLocalEnv.snapshot_candidates` 保存输入快照候选列表，元素为 `SnapshotCandidate(name, handled=False)`；各环境独立创建列表。启动时列表默认为空，直接复用当前 `gv`；预留执行配置 `env.range` 默认为 `None`，不限制步骤。候选加载、断点定位和执行现场恢复机制尚未实现。
+失败操作只保留 I，没有对应 O；先前成功的内部操作快照保留。独立 AP 在等待启动通知时退出，首轮产生 3 个 I 点和 1 份初始 O 快照。FlowRun 的计数器和记录状态独立于 GV、Env；Env、队列和 Frame 不写入记录文件。
 
-`acquire` 失败时 action 尚未执行，不保存快照。`release` 失败时跳过本次保存，不消耗位置序号，已有快照保留。保存失败时 `release` 已完成，不消耗位置序号，保存异常自然向上传播；方法本身也失败时，方法原异常保留在异常链中。旧的手动快照文件不再生成。
+`records.json` 包含记录格式版本、模型版本、涉及 spec 的指纹，以及 I 的名称、base、输入快照、源位置和引用感知的动作输入。首轮 base 均为 null，无 handled。当前不提供并发加载、输入解码恢复、重放或派生分支。
 
-`make run` 清理快照后在同一进程中依次解释执行 BP、AP，AP 复用 BP 执行后的当前模型。InitProc 已有 spec 定义，但暂不由 `main.py` 启动；显式调用其 Origin 时，以 `initproc_0.0.snap` 等名称保存快照。`make clean` 删除本目录下的 `*.snap`，保留此说明文件。生成文件和临时文件不提交。
+GV 模型版本保持 9，类型和回调仍注册于 `flows.model_specs`。通用加载器继续支持没有 `input_point` 字段的版本 9 快照；旧的平铺目录和按方法退出编号的文件不能作为新 I/O 历史使用，应清理后重新生成。
+
+`make run` 先清理生成数据再执行 BP、AP；InitProc 不接入 main。已有同 Flow 记录或输出时，直接重复运行会拒绝覆盖。`make clean_snap` 递归清理记录、快照及生成临时文件，`make clean` 还清理 Python 缓存；保留本说明文件。生成数据不提交。

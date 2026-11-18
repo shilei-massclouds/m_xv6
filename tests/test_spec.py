@@ -1,5 +1,6 @@
 """Spec parsing and interpretation; model files serve only as language fixtures."""
 
+import json
 import sys
 import textwrap
 from dataclasses import dataclass, field
@@ -12,6 +13,7 @@ import pytest
 from framework import snapshot_paths
 from framework.contracts import ContractViolation
 from framework.engine import System, TaskLocalEnv
+from framework.flow_run import FlowRun
 from framework.snapshot import load_snapshot
 from framework.spec import SpecError, SpecRegistry, parse_spec
 
@@ -41,6 +43,17 @@ def write_spec(tmp_path: Path, name: str, source: str) -> Path:
     return path
 
 
+def execute(root: SpecRoot, env: TaskLocalEnv, target: str, action: str, **kwargs):
+    with FlowRun(root, env, 1):
+        return System().drive(env, target, action, **kwargs)
+
+
+def point_count(flow: str = "example") -> int:
+    return len(
+        json.loads(snapshot_paths.input_records_path(flow).read_text())["points"]
+    )
+
+
 @pytest.mark.parametrize("items", [[], [10], [10, 20, 30]])
 def test_original_proc_table_spec_returns_selected_item(
     root: SpecRoot, tmp_path: Path, items: list[int]
@@ -50,16 +63,16 @@ def test_original_proc_table_spec_returns_selected_item(
     root.table.table.extend(items)
     env = TaskLocalEnv(name="example")
 
-    result = System().drive(env, "table", "_pick_runnable")
+    result = execute(root, env, "table", "_pick_runnable")
 
     assert result == (items[0] if items else None)
     assert root.table.table == items[1:]
     restored = SpecRoot()
     load_snapshot(
         restored,
-        tmp_path / "example_0.0.snap",
+        tmp_path / "example" / "outputs" / "example_0.1.snap",
         model_version=1,
-        expected_checkpoint="example_0.0",
+        expected_checkpoint="example_0.1",
     )
     assert restored.table.table == items[1:]
     assert env.depth == 0
@@ -100,11 +113,11 @@ def test_nested_drives_assign_results_before_continuing(root: SpecRoot, tmp_path
     root.worker = SpecRegistry([path]).model("SpecWorker")()
     env = TaskLocalEnv(name="example")
 
-    result = System().drive(env, "worker", "start")
+    result = execute(root, env, "worker", "start")
 
     assert result == 6
     assert root.worker.value == 10
-    assert env.snapshot_position == 2
+    assert point_count() == 6
     assert env.depth == 0
 
 
@@ -131,7 +144,7 @@ def test_guards_and_kwargs_protect_nested_actions(root: SpecRoot, tmp_path: Path
     env.cv.expose("remote_irq", "remote_tasks")
     before = repr(env.cv)
 
-    System().drive(env, "worker", "start", amount=3)
+    execute(root, env, "worker", "start", amount=3)
 
     assert root.worker.value == 3
     assert repr(env.cv) == before
@@ -168,11 +181,12 @@ def test_invalid_contracts_fail_at_spec_location(
     env = TaskLocalEnv(name="example")
 
     with pytest.raises(exception, match=match):
-        System().drive(env, "worker", "_test")
+        execute(root, env, "worker", "_test")
 
     assert env.depth == 0
     assert not env.signal_queues
-    assert (tmp_path / "example_0.0.snap").exists()
+    assert snapshot_paths.snapshot_path("example", 0).exists()
+    assert point_count() == 0
 
 
 def test_selected_ensures_branch_is_checked(root: SpecRoot, tmp_path: Path):
@@ -197,11 +211,9 @@ def test_selected_ensures_branch_is_checked(root: SpecRoot, tmp_path: Path):
     """,
     )
     root.worker = SpecRegistry([path]).model("ChoiceSpec")()
+    assert execute(root, TaskLocalEnv(name="first"), "worker", "_choose", value=0) == 10
     assert (
-        System().drive(TaskLocalEnv(name="first"), "worker", "_choose", value=0) == 10
-    )
-    assert (
-        System().drive(TaskLocalEnv(name="second"), "worker", "_choose", value=1) == 20
+        execute(root, TaskLocalEnv(name="second"), "worker", "_choose", value=1) == 20
     )
 
 
@@ -225,11 +237,11 @@ def test_exception_unwinds_guards_and_nested_frames(root: SpecRoot, tmp_path: Pa
     before = repr(env.cv)
 
     with pytest.raises(AssertionError, match="inner failed"):
-        System().drive(env, "worker", "_outer")
+        execute(root, env, "worker", "_outer")
 
     assert repr(env.cv) == before
     assert env.depth == 0
-    assert env.snapshot_position == 2
+    assert point_count() == 1
     assert not env.signal_queues
 
 
@@ -264,7 +276,7 @@ def test_pattern_matching_and_declared_outputs(
     root.worker = SpecRegistry([path]).model("OutputSpec")()
     kwargs = {"value": value} if value else {}
     assert (
-        System().drive(TaskLocalEnv(name="example"), "worker", "start", **kwargs)
+        execute(root, TaskLocalEnv(name="example"), "worker", "start", **kwargs)
         == expected
     )
 
@@ -367,10 +379,10 @@ def test_declared_output_leaves_guard_before_ensures(
     )
     root.worker = SpecRegistry([path]).model("GuardOutputSpec")()
     env = TaskLocalEnv(name="example")
-    assert System().drive(env, "worker", "_check") == 3
+    assert execute(root, env, "worker", "_check") == 3
     assert env.cv.local_irq == 0
     assert env.cv.remote_tasks == 0
-    assert env.snapshot_position == snapshot_count
+    assert point_count() == snapshot_count
     assert env.depth == 0
     assert not env.signal_queues
 
@@ -404,7 +416,7 @@ def test_inheritance_enums_and_visibility(root: SpecRoot, tmp_path: Path):
     env = TaskLocalEnv(name="example")
     env.cv.expose("remote_irq", "remote_tasks")
     assert (
-        System().drive(env, "worker", "_read") is registry.namespace["SpecState"].READY
+        execute(root, env, "worker", "_read") is registry.namespace["SpecState"].READY
     )
     assert root.worker.values == []
 
@@ -437,10 +449,10 @@ def test_signal_callback_survives_snapshot_restore(root: SpecRoot, tmp_path: Pat
     """,
     )
     root.worker = SpecRegistry([path]).model("CallbackSpec")()
-    System().drive(TaskLocalEnv(name="example"), "worker", "install")
+    execute(root, TaskLocalEnv(name="example"), "worker", "install")
 
     restored = SpecRoot()
-    load_snapshot(restored, tmp_path / "example_0.0.snap", model_version=1)
+    load_snapshot(restored, snapshot_paths.snapshot_path("example", 2), model_version=1)
 
     assert restored.worker is not root.worker
     assert restored.worker.callback.__self__ is restored.worker

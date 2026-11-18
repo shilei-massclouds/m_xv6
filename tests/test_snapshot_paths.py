@@ -13,7 +13,10 @@ def test_snapshot_path_uses_configured_directory(
     monkeypatch.setattr(snapshot_paths, "SNAPSHOT_DIR", tmp_path)
 
     assert snapshot_paths.snapshot_path("example", position=12, branch=3) == (
-        tmp_path / "example_3.12.snap"
+        tmp_path / "example" / "outputs" / "example_3.12.snap"
+    )
+    assert snapshot_paths.input_records_path("example") == (
+        tmp_path / "example" / "inputs" / "records.json"
     )
 
 
@@ -21,6 +24,8 @@ def test_snapshot_path_uses_configured_directory(
 def test_invalid_flow_name_is_rejected(flow: str):
     with pytest.raises(ValueError, match="flow name"):
         snapshot_paths.snapshot_path(flow, 0)
+    with pytest.raises(ValueError, match="flow name"):
+        snapshot_paths.input_records_path(flow)
 
 
 @pytest.mark.parametrize("position,branch", [(-1, 0), (0, -1), (True, 0), (0, True)])

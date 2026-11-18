@@ -1,4 +1,4 @@
-"""Start AP derivation from the BP initialization checkpoint."""
+"""Start independent AP derivation with a fresh task-local environment."""
 
 from dataclasses import dataclass, field
 
