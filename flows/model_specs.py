@@ -1,4 +1,4 @@
-"""Register the BP model graph with stable names for cross-process snapshots."""
+"""Register all flow models with stable names for cross-process snapshots."""
 
 from pathlib import Path
 from typing import Any
@@ -9,6 +9,8 @@ _ROOT = Path(__file__).resolve().parents[1]
 _MODEL_PATHS = (
     "flows/CpuFlow.spec",
     "flows/BpInitFlow.spec",
+    "flows/ApInitFlow.spec",
+    "flows/InitProcFlow.spec",
     "kernel/Page.spec",
     "kernel/PageAllocator.spec",
     "kernel/KernelPageTable.spec",
@@ -20,6 +22,7 @@ _MODEL_PATHS = (
     "kernel/Trap.spec",
     "kernel/IO.spec",
     "kernel/SmpStarted.spec",
+    "kernel/FirstProc.spec",
     "drivers/Console.spec",
     "drivers/Uart.spec",
     "drivers/DevSW.spec",
@@ -28,6 +31,7 @@ _MODEL_PATHS = (
     "fs/BufferCache.spec",
     "fs/InodeTable.spec",
     "fs/FileTable.spec",
+    "fs/FileSystem.spec",
     "structs/Array.spec",
 )
 

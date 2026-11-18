@@ -4,21 +4,18 @@ from dataclasses import dataclass, field
 
 from flows.ap_init_flow import ApInitFlow
 from flows.bp_init_flow import BpInitFlow
-from flows.bp_specs import new_model
 from flows.initproc_flow import InitProcFlow
+from flows.model_specs import new_model
 from framework.engine import System
-from fs.fs import FileSystem
-from kernel.current import CurrentHart
-from kernel.flags import FirstProc
 
-MODEL_VERSION = 8
+MODEL_VERSION = 9
 
 
 @dataclass
 class GlobalVars:
     bp_init_flow: System = field(default_factory=BpInitFlow)
-    ap_init_flow: ApInitFlow = field(default_factory=ApInitFlow)
-    initproc_flow: InitProcFlow = field(default_factory=InitProcFlow)
+    ap_init_flow: System = field(default_factory=ApInitFlow)
+    initproc_flow: System = field(default_factory=InitProcFlow)
     console: System = field(default_factory=lambda: new_model("Console"))
     io: System = field(default_factory=lambda: new_model("IO"))
     uart: System = field(default_factory=lambda: new_model("Uart"))
@@ -30,7 +27,7 @@ class GlobalVars:
     vm: System = field(default_factory=lambda: new_model("VM"))
     proc_table: System = field(default_factory=lambda: new_model("ProcTable"))
     bp_hart: System = field(default_factory=lambda: new_model("CurrentHart"))
-    ap_hart: CurrentHart = field(default_factory=CurrentHart)
+    ap_hart: System = field(default_factory=lambda: new_model("CurrentHart"))
     trap: System = field(default_factory=lambda: new_model("Trap"))
     plic: System = field(default_factory=lambda: new_model("Plic"))
     bcache: System = field(default_factory=lambda: new_model("BufferCache"))
@@ -40,8 +37,8 @@ class GlobalVars:
     initproc: System | None = None
     pidgen: System = field(default_factory=lambda: new_model("PidGen"))
     smp_started: System = field(default_factory=lambda: new_model("SmpStarted"))
-    first_proc: FirstProc = field(default_factory=FirstProc)
-    fs: FileSystem = field(default_factory=FileSystem)
+    first_proc: System = field(default_factory=lambda: new_model("FirstProc"))
+    fs: System = field(default_factory=lambda: new_model("FileSystem"))
 
     def reset(self):
         self.__init__()

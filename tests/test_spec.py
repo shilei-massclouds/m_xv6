@@ -271,17 +271,27 @@ def test_unsupported_syntax_reports_file(root: SpecRoot, tmp_path: Path, source:
         parse_spec(path)
 
 
-def test_return_releases_guard_before_ensures(root: SpecRoot, tmp_path: Path):
+@pytest.mark.parametrize(
+    "return_statement,snapshot_count",
+    [("return 3", 1), ('return drive("self", "_value")', 2)],
+)
+def test_return_releases_guard_before_ensures(
+    root: SpecRoot, tmp_path: Path, return_statement: str, snapshot_count: int
+):
     path = write_spec(
         tmp_path,
         "GuardReturnSpec",
-        """
+        f"""
         Def _check():
             Actions:
                 with GuardSpinLock(env.cv, self):
-                    return 3
+                    {return_statement}
             Ensures:
                 env.cv.local_irq == 0 and env.cv.remote_tasks == 0
+
+        Def _value():
+            Actions:
+                return 3
     """,
     )
     root.worker = SpecRegistry([path]).model("GuardReturnSpec")()
@@ -289,6 +299,9 @@ def test_return_releases_guard_before_ensures(root: SpecRoot, tmp_path: Path):
     assert System().drive(env, "worker", "_check") == 3
     assert env.cv.local_irq == 0
     assert env.cv.remote_tasks == 0
+    assert env.snapshot_position == snapshot_count
+    assert env.depth == 0
+    assert not env.signal_queues
 
 
 def test_inheritance_enums_and_visibility(root: SpecRoot, tmp_path: Path):

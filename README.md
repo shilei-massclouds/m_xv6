@@ -1,6 +1,6 @@
 # m_xv6
 
-BP 已改为解释执行 `flows/BpInitFlow.spec`，其依赖对象也由各目录中的 spec 定义；AP Flow 暂时仍使用 Python 实现。首个验证输入为 `kernel/ProcTable.spec`；语法、执行语义和验证方式见 [framework/SPEC.md](framework/SPEC.md)。I 点恢复和并发输入调度尚未接入。
+BP、AP 和 InitProc Flow 均已改为 spec 解释执行，入口分别为 `flows/BpInitFlow.spec`、`flows/ApInitFlow.spec` 和 `flows/InitProcFlow.spec`，依赖对象也由各目录中的 spec 定义。`flows/model_specs.py` 统一注册模型，原有 Flow Python 模块仅保留类型和枚举导出。首个验证输入为 `kernel/ProcTable.spec`；语法、执行语义和验证方式见 [framework/SPEC.md](framework/SPEC.md)。I 点恢复和并发输入调度尚未接入。
 
 当前依次运行 BP、AP 推导：
 
@@ -20,19 +20,19 @@ python3 main.py
 
 方法异常退出（包括 `StepPoint` 和契约失败）时，只要 `release` 成功，也会保存退出现场；嵌套异常逐层退出时，各私有 action 分别处理。快照记录 `release` 后的状态。`acquire` 失败时方法尚未调用，不产生快照；`release` 失败时跳过本次保存，不消耗序号，已有快照保留。保存失败时 `release` 已完成，不消耗序号、不改写已有文件、不回滚模型修改。保存异常自然向上传播；方法本身也失败时，方法原异常保留在异常链中。
 
-每次运行 `main.py` 都在新进程中创建默认的 `gv`，BP 从这些默认值开始推导，AP 随后复用当前 `gv`。每个 Origin 实例独立创建环境，按一次推导使用；新建 Origin 不会重置 `gv`。当前启动的候选列表为空，`range` 为 `None`。InitProc 当前不由 `main.py` 运行；原有手动快照文件不再生成。
+每次运行 `main.py` 都在新进程中创建默认的 `gv`，BP 从这些默认值开始推导，AP 随后复用当前 `gv`。每个 Origin 实例独立创建环境，按一次推导使用；新建 Origin 不会重置 `gv`。当前启动的候选列表为空，`range` 为 `None`。InitProc 已转为 spec，但暂不接入 `main.py`；可在 BP 或 AP 推导后显式调用 `InitProcOrigin(source="bp")` 或 `InitProcOrigin(source="ap")` 的 `start()`。`source` 目前仅保留来源标记，不加载快照；InitProc 复用调用时的 `gv`。原有手动快照文件不再生成。
 
 `GlobalVars.initproc` 是初始为 `None` 的可选进程引用，不预先创建进程；模型暂时没有 `childproc` 字段。BP 的 `userinit` 调用 `ProcTable._alloc` 创建进程、分配资源，并在其进入 `RUNNABLE` 状态后通过 `put_runnable(task=proc)` 入队。首次分配会设置 `gv.initproc`，后续分配创建独立进程，并保留该引用。
 
 `ProcTable.table: list[Proc]` 保存可运行进程引用；`pick_runnable` 移除并取出队首，空队列则输出 `None`。快照既支持分配前的 `initproc is None` 状态，也会保持分配后队列元素与 `gv.initproc` 的对象身份关系；额外进程可以只通过队列或其他模型对象引用。
 
-当前模型版本为 8，BP 所需对象由 `flows/bp_specs.py` 注册并创建；其他模型版本的快照按不兼容处理，旧 Python 模型快照需重新生成。`make run` 会清理并重建自动快照。`snapshots/README.md` 随代码提交以保留目录，运行时生成文件加入忽略规则。
+当前模型版本为 9，所有 Flow 及其依赖对象由 `flows/model_specs.py` 注册并创建；其他模型版本的快照按不兼容处理。AP、InitProc 类型及注册模块均已变化，旧快照需重新生成。`make run` 会清理并重建 BP、AP 自动快照。`snapshots/README.md` 随代码提交以保留目录，运行时生成文件加入忽略规则。
 
 `System.drive(env, "self", action, **kwargs)` 和 `System.emit(env, "self", action, **kwargs)` 将目标绑定到调用它们的 System 实例。创建 Signal 时通过 `source` 保存该实例的引用，处理时解析 `"self"`，随后按原有流程执行 `acquire`、目标方法和 `release`。其他目标名称仍通过 `gv` 路径查找。
 
 嵌套调用和 `emit` 各自记录当前调用对象。队列中的信号保留其来源对象；快照恢复时，来源引用与恢复后的对象图保持一致。
 
-spec 方法可用 `Def _pick_runnable() -> nextp:` 声明输出，调用方通过 `next_runnable = drive("proc_table", "pick_runnable")` 接收结果。`ProcTable.spec` 同时兼容原有 AP 调度器传入的 `ret=Holder[Proc]()`，由公开包装方法填充 `holder.value`；BP 的 spec 调度器直接使用返回值。
+spec 方法可用 `Def _pick_runnable() -> nextp:` 声明输出，调用方通过 `next_runnable = drive("proc_table", "pick_runnable")` 接收结果。BP 和 AP 共用 `CpuFlow.spec` 中的调度器，均直接使用返回值；原有 Holder 返回值桥接已移除。
 
 `@protected_by("io")` 将类或方法的保护关系关联到 `gv.io`。声明接受非空对象路径，也支持 `"holder.lock"` 这样的点号路径；方法声明覆盖类声明。每次检查时都从当前 `gv` 解析路径，因此替换对象或恢复快照后会使用当前实例。名称不存在时抛出 `AttributeError`。
 
@@ -97,7 +97,7 @@ def adjust(self, amount):
 
 入口没有成立的分支，或选中出口行没有成立的条件时，立即抛出 `ContractViolation`，未捕获时程序终止。错误消息报告调用处的文件、行号、函数/方法名和 `requires`/`ensures` 阶段，也可以通过异常的 `filename`、`lineno`、`function`、`phase` 属性读取。出口失败还报告从 0 开始的入口分支索引 `branch_index`。`python -O` 下仍然检查。
 
-入口选择保存在当前 Python 调用帧的保留局部变量 `__m_xv6_contract_state__` 中，随调用结束释放；直接调用、嵌套、递归及交错恢复的生成器各自独立。调用者在方法入口和正常出口显式放置检查，框架不自动包装方法或补跑遗漏的出口检查。BP/AP 的 `start` 检查调度器从 `RUNNING` 到 `SWITCHED` 或 `WFI`，InitProc 检查内核态到用户态，`ProcTable._pick_runnable` 和 `_put_runnable` 按入口队列为空或非空的分支检查出口。
+Python 契约函数的入口选择保存在当前 Python 调用帧的保留局部变量 `__m_xv6_contract_state__` 中，随调用结束释放；直接调用、嵌套、递归及交错恢复的生成器各自独立。Python 调用者在方法入口和正常出口显式放置检查，框架不自动包装方法或补跑遗漏的出口检查。spec 契约由解释器在对应 Frame 中选择入口并检查出口，详见 [framework/SPEC.md](framework/SPEC.md)。BP 的 `_start` 和 AP 的 `start` 检查调度器从 `RUNNING` 到 `SWITCHED` 或 `WFI`，InitProc 检查内核态到用户态，`ProcTable._pick_runnable` 和 `_put_runnable` 按入口队列为空或非空的分支检查出口。
 
 契约函数不保存、加载或回滚状态。action 中的契约检查失败会终止本次调用，私有 action 仍由 `handle()` 的 `finally` 在 `release` 成功后保存退出现场；已有快照不会撤销或改写。
 

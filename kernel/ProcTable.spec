@@ -44,13 +44,10 @@ Def _alloc():
         if gv.initproc is None:
             gv.initproc = proc
 
-Def pick_runnable(**kwargs) -> nextp:
+Def pick_runnable() -> nextp:
     Actions:
         with GuardSpinLock(env.cv, self):
             nextp = drive("self", "_pick_runnable")
-        # The Python AP scheduler still uses a Holder output parameter.
-        if "ret" in kwargs:
-            kwargs["ret"].value = nextp
 
 Def put_runnable(**kwargs):
     Actions:
