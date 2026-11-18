@@ -8,7 +8,13 @@ from types import ModuleType
 import pytest
 
 from framework import snapshot_paths
-from framework.engine import StepPoint, System, TaskLocalEnv, exit_from
+from framework.engine import (
+    SnapshotCandidate,
+    StepPoint,
+    System,
+    TaskLocalEnv,
+    exit_from,
+)
 from framework.snapshot import SnapshotError, load_snapshot
 
 
@@ -100,6 +106,8 @@ def test_private_actions_snapshot_after_release(root: ExampleRoot, tmp_path: Pat
     assert second.self_ref is second
     assert env.snapshot_position == 2
     assert env.snapshot_branch == 0
+    assert env.snapshot_candidates == []
+    assert env.range is None
     assert env.depth == 0
     assert not env.signal_queues
 
@@ -160,6 +168,11 @@ def test_flows_have_independent_snapshot_positions(root: ExampleRoot, tmp_path: 
     assert (first.snapshot_position, second.snapshot_position) == (2, 1)
     assert first.cv is not second.cv
     assert first.signal_queues is not second.signal_queues
+    first.snapshot_candidates.append(SnapshotCandidate(name="source_0.0"))
+    first.range = (2, 5)
+    assert first.snapshot_candidates is not second.snapshot_candidates
+    assert second.snapshot_candidates == []
+    assert second.range is None
 
 
 def test_snapshot_names_include_execution_branch(root: ExampleRoot, tmp_path: Path):

@@ -1,22 +1,24 @@
 # m_xv6
 
-当前运行 BP 推导：
+当前依次运行 BP、AP 推导：
 
 ```sh
 python3 main.py
 ```
 
-执行 `make` 或 `make run` 会先清理快照，再运行 BP。`make clean` 清理 Python 缓存以及 `snapshots/` 下的 `*.snap`，保留该目录中的 `README.md`。
+执行 `make` 或 `make run` 会先清理快照，再在同一进程中依次运行 BP、AP。`make clean` 清理 Python 缓存以及 `snapshots/` 下的 `*.snap`，保留该目录中的 `README.md`。
 
 快照由 `framework/engine.py` 中的 `Signal._save_snapshot()` 封装，在 `Signal.handle()` 的 `finally` 中先执行 `release`，成功后调用保存。通过 `drive` 或 `emit` 调用的 action 名称以 `_` 开头时，无论正常返回还是异常退出，均在 `release` 成功后尝试保存 `gv`；公开 action 本身不保存，其内部调用的私有 action 仍会保存。框架内部直接调用的辅助方法不属于 action 边界。业务代码不再手动调用保存接口。
 
 `TaskLocalEnv` 必须提供当前 Flow 的 `name`，BP Origin 创建 `TaskLocalEnv(name="bp")`。同一 Flow 的嵌套调用和排队信号共享环境，按方法实际退出的顺序分配位置序号；每个环境的 `snapshot_position` 从 0 开始，成功保存后加 1。`snapshot_branch` 当前默认为 0，预留给后续执行分支机制，与契约的入口分支索引无关。
 
+环境还保存输入快照候选列表 `snapshot_candidates: list[SnapshotCandidate]` 和执行范围 `range: tuple[int, int] | None`。候选对象包含快照名称 `name` 和默认值为 `False` 的 `handled`。每个 Origin 创建环境时独立创建候选列表，默认空列表表示不加载、直接复用当前 `gv`；`range` 默认 `None`，表示不限制执行范围。范围以 `(start, end)` 表示，`start` 指定先跳过的步数，`end` 指定结束位置。当前这两个字段仅保存配置，非空候选的加载调度以及范围内步数控制将在后续实现。
+
 文件名为 `<flow>_<位置序号>.<分支序号>.snap`，文件头的 checkpoint 为不含扩展名的同名字符串。例如 BP 依次生成 `bp_0.0.snap`、`bp_1.0.snap` 等。路径由 `framework/snapshot_paths.py` 生成，固定相对于仓库根目录，与当前工作目录无关；Flow 名称必须是非空 Python 标识符，两个序号必须是非负整数。
 
 方法异常退出（包括 `StepPoint` 和契约失败）时，只要 `release` 成功，也会保存退出现场；嵌套异常逐层退出时，各私有 action 分别处理。快照记录 `release` 后的状态。`acquire` 失败时方法尚未调用，不产生快照；`release` 失败时跳过本次保存，不消耗序号，已有快照保留。保存失败时 `release` 已完成，不消耗序号、不改写已有文件、不回滚模型修改。保存异常自然向上传播；方法本身也失败时，方法原异常保留在异常链中。
 
-每次运行 `main.py` 都在新进程中创建默认的 `gv`，BP 从这些默认值开始推导。每个 Origin 实例独立创建环境，按一次推导使用；新建 Origin 不会重置 `gv`。AP、InitProc 的旧加载入口尚未接入自动快照，当前不由 `main.py` 运行；原有手动快照文件不再生成。
+每次运行 `main.py` 都在新进程中创建默认的 `gv`，BP 从这些默认值开始推导，AP 随后复用当前 `gv`。每个 Origin 实例独立创建环境，按一次推导使用；新建 Origin 不会重置 `gv`。当前启动的候选列表为空，`range` 为 `None`。InitProc 当前不由 `main.py` 运行；原有手动快照文件不再生成。
 
 `GlobalVars.initproc` 是初始为 `None` 的可选进程引用，不预先创建进程；模型暂时没有 `childproc` 字段。BP 的 `userinit` 调用 `ProcTable._alloc` 创建进程、分配资源，并在其进入 `RUNNABLE` 状态后通过 `put_runnable(task=proc)` 入队。首次分配会设置 `gv.initproc`，后续分配创建独立进程，并保留该引用。
 
@@ -46,9 +48,15 @@ def _sync_putc(self, env):
 可以加载已经自动生成的快照：
 
 ```python
-from global_vars import gv
+from framework.snapshot import load_snapshot
+from global_vars import MODEL_VERSION, gv
 
-metadata = gv.load_snapshot("snapshots/bp_0.0.snap", expected_checkpoint="bp_0.0")
+metadata = load_snapshot(
+    gv,
+    "snapshots/bp_0.0.snap",
+    model_version=MODEL_VERSION,
+    expected_checkpoint="bp_0.0",
+)
 ```
 
 `expected_checkpoint` 可以省略；指定时必须与文件头一致。文件格式版本和模型版本始终检查。通用实现位于 `framework/snapshot.py`，模型版本集中定义为 `global_vars.MODEL_VERSION`；模型结构或语义发生不兼容变化时应提升模型版本。快照文件不包含 Python 类和函数的代码，跨进程加载时需有兼容且可导入的模型代码。

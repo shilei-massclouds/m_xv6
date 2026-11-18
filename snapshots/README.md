@@ -6,6 +6,8 @@
 
 Flow 名称来自 `TaskLocalEnv.name`，创建环境时必须显式提供；路径集中由 `framework/snapshot_paths.py` 生成。当前模型版本为 7。快照仅保存从 `gv` 可达的对象图，不包含 Python 调用栈或未从 `gv` 引用的局部环境。
 
-`acquire` 失败时 action 尚未执行，不保存快照。`release` 失败时跳过本次保存，不消耗位置序号，已有快照保留。保存失败时 `release` 已完成，不消耗位置序号，保存异常自然向上传播；方法本身也失败时，方法原异常保留在异常链中。当前只运行 BP；AP、InitProc 的旧加载入口尚未接入自动快照，旧的手动快照文件不再生成。
+`TaskLocalEnv.snapshot_candidates` 保存输入快照候选列表，元素为 `SnapshotCandidate(name, handled=False)`；各环境独立创建列表。启动时列表默认为空，直接复用当前 `gv`；执行范围 `env.range` 默认为 `None`，不限制步骤。候选列表和执行范围目前只保存配置，加载调度和跳步机制另行实现。
 
-`make run` 清理快照后运行 BP。`make clean` 删除本目录下的 `*.snap`，保留此说明文件。生成文件和临时文件不提交。
+`acquire` 失败时 action 尚未执行，不保存快照。`release` 失败时跳过本次保存，不消耗位置序号，已有快照保留。保存失败时 `release` 已完成，不消耗位置序号，保存异常自然向上传播；方法本身也失败时，方法原异常保留在异常链中。旧的手动快照文件不再生成。
+
+`make run` 清理快照后在同一进程中依次运行 BP、AP，AP 复用 BP 执行后的当前模型。`make clean` 删除本目录下的 `*.snap`，保留此说明文件。生成文件和临时文件不提交。

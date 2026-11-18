@@ -30,6 +30,14 @@ def env_enabled(name: str) -> bool:
 
 
 @dataclass
+class SnapshotCandidate:
+    """A snapshot selected as input for a derivation."""
+
+    name: str
+    handled: bool = False
+
+
+@dataclass
 class TaskLocalEnv:
     name: str
     cv: ContentionVector = field(default_factory=ContentionVector.zeros)
@@ -37,6 +45,9 @@ class TaskLocalEnv:
     signal_queues: list[deque[Signal]] = field(default_factory=list, repr=False)
     snapshot_position: int = 0
     snapshot_branch: int = 0
+    snapshot_candidates: list[SnapshotCandidate] = field(default_factory=list)
+    # Execution range configuration; step skipping will be implemented separately.
+    range: tuple[int, int] | None = None
 
 
 def _get_target_ref(path: str) -> System:
