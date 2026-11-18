@@ -98,7 +98,7 @@ def test_private_actions_snapshot_after_release(root: ExampleRoot, tmp_path: Pat
     assert root.system.drive(env, "system", "_step", amount=4) == 7
 
     first = read_snapshot(tmp_path, "example_0.0")
-    second = read_snapshot(tmp_path, "example_1.0")
+    second = read_snapshot(tmp_path, "example_0.1")
     assert (first.system.value, first.system.releases) == (3, 1)
     assert (second.system.value, second.system.releases) == (7, 2)
     assert root.system.releases == 2
@@ -138,7 +138,7 @@ def test_nested_actions_numbered_in_return_order(root: ExampleRoot, tmp_path: Pa
     assert root.system.drive(env, "self", "_nested") == 11
 
     assert read_snapshot(tmp_path, "example_0.0").system.value == 1
-    assert read_snapshot(tmp_path, "example_1.0").system.value == 11
+    assert read_snapshot(tmp_path, "example_0.1").system.value == 11
     assert env.snapshot_position == 2
 
 
@@ -148,7 +148,7 @@ def test_emitted_actions_also_snapshot(root: ExampleRoot, tmp_path: Path):
     root.system.drive(env, "self", "_queued")
 
     assert read_snapshot(tmp_path, "example_0.0").system.value == 10
-    assert read_snapshot(tmp_path, "example_1.0").system.value == 11
+    assert read_snapshot(tmp_path, "example_0.1").system.value == 11
     assert env.snapshot_position == 2
 
 
@@ -162,7 +162,7 @@ def test_flows_have_independent_snapshot_positions(root: ExampleRoot, tmp_path: 
 
     assert {path.name for path in tmp_path.iterdir()} == {
         "first_0.0.snap",
-        "first_1.0.snap",
+        "first_0.1.snap",
         "second_0.0.snap",
     }
     assert (first.snapshot_position, second.snapshot_position) == (2, 1)
@@ -180,7 +180,7 @@ def test_snapshot_names_include_execution_branch(root: ExampleRoot, tmp_path: Pa
 
     root.system.drive(env, "self", "_step")
 
-    assert read_snapshot(tmp_path, "example_0.2").system.value == 1
+    assert read_snapshot(tmp_path, "example_2.0").system.value == 1
     assert env.snapshot_branch == 2
 
 
@@ -197,7 +197,7 @@ def test_action_failure_snapshots_after_release(root: ExampleRoot, tmp_path: Pat
     assert env.depth == 0
     assert not env.signal_queues
     root.system.drive(env, "self", "_step")
-    assert read_snapshot(tmp_path, "example_1.0").system.value == 2
+    assert read_snapshot(tmp_path, "example_0.1").system.value == 2
 
 
 def test_parent_failure_preserves_completed_child_snapshot(
@@ -209,7 +209,7 @@ def test_parent_failure_preserves_completed_child_snapshot(
         root.system.drive(env, "self", "_nested_fail")
 
     assert read_snapshot(tmp_path, "example_0.0").system.value == 1
-    parent = read_snapshot(tmp_path, "example_1.0")
+    parent = read_snapshot(tmp_path, "example_0.1")
     assert (parent.system.value, parent.system.releases) == (1, 2)
     assert env.snapshot_position == 2
     assert len(list(tmp_path.iterdir())) == 2
@@ -260,7 +260,7 @@ def test_save_failure_preserves_files_and_position(root: ExampleRoot, tmp_path: 
     assert not env.signal_queues
     del root.unpicklable
     root.system.drive(env, "self", "_step")
-    assert read_snapshot(tmp_path, "example_1.0").system.value == 3
+    assert read_snapshot(tmp_path, "example_0.1").system.value == 3
 
 
 def test_save_failure_keeps_original_action_error_in_exception_chain(

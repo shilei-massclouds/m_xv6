@@ -1,5 +1,7 @@
 # m_xv6
 
+spec 解释器原型已加入，首个验证输入为 `kernel/ProcTable.spec`；语法、执行语义和验证方式见 [framework/SPEC.md](framework/SPEC.md)。当前停在解释器验证阶段，尚未迁移其余 Python 模型，也未接入 I 点恢复和并发输入调度。
+
 当前依次运行 BP、AP 推导：
 
 ```sh
@@ -12,9 +14,9 @@ python3 main.py
 
 `TaskLocalEnv` 必须提供当前 Flow 的 `name`，BP Origin 创建 `TaskLocalEnv(name="bp")`。同一 Flow 的嵌套调用和排队信号共享环境，按方法实际退出的顺序分配位置序号；每个环境的 `snapshot_position` 从 0 开始，成功保存后加 1。`snapshot_branch` 当前默认为 0，预留给后续执行分支机制，与契约的入口分支索引无关。
 
-环境还保存输入快照候选列表 `snapshot_candidates: list[SnapshotCandidate]` 和执行范围 `range: tuple[int, int] | None`。候选对象包含快照名称 `name` 和默认值为 `False` 的 `handled`。每个 Origin 创建环境时独立创建候选列表，默认空列表表示不加载、直接复用当前 `gv`；`range` 默认 `None`，表示不限制执行范围。范围以 `(start, end)` 表示，`start` 指定先跳过的步数，`end` 指定结束位置。当前这两个字段仅保存配置，非空候选的加载调度以及范围内步数控制将在后续实现。
+环境还保存输入快照候选列表 `snapshot_candidates: list[SnapshotCandidate]` 和预留执行配置 `range: tuple[int, int] | None`。候选对象包含快照名称 `name` 和默认值为 `False` 的 `handled`。每个 Origin 创建环境时独立创建候选列表，默认空列表表示不加载、直接复用当前 `gv`；`range` 默认 `None`，表示不限制执行范围。目标是指定私有方法执行前的断点及输入快照，从该执行点恢复 Flow。候选加载和执行现场的恢复机制尚未实现，`range` 目前仅为预留字段。
 
-文件名为 `<flow>_<位置序号>.<分支序号>.snap`，文件头的 checkpoint 为不含扩展名的同名字符串。例如 BP 依次生成 `bp_0.0.snap`、`bp_1.0.snap` 等。路径由 `framework/snapshot_paths.py` 生成，固定相对于仓库根目录，与当前工作目录无关；Flow 名称必须是非空 Python 标识符，两个序号必须是非负整数。
+文件名为 `<flow>_<分支序号>.<位置序号>.snap`，文件头的 checkpoint 为不含扩展名的同名字符串。例如 BP 的分支 0 依次生成 `bp_0.0.snap`、`bp_0.1.snap`、`bp_0.2.snap` 等。位置序号仍按方法退出顺序递增，与方法进入前的断点标识分别定义。路径由 `framework/snapshot_paths.py` 生成，固定相对于仓库根目录，与当前工作目录无关；Flow 名称必须是非空 Python 标识符，两个序号必须是非负整数。旧命名文件应清理后重新生成。
 
 方法异常退出（包括 `StepPoint` 和契约失败）时，只要 `release` 成功，也会保存退出现场；嵌套异常逐层退出时，各私有 action 分别处理。快照记录 `release` 后的状态。`acquire` 失败时方法尚未调用，不产生快照；`release` 失败时跳过本次保存，不消耗序号，已有快照保留。保存失败时 `release` 已完成，不消耗序号、不改写已有文件、不回滚模型修改。保存异常自然向上传播；方法本身也失败时，方法原异常保留在异常链中。
 

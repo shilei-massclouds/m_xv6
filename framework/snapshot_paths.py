@@ -6,14 +6,14 @@ SNAPSHOT_DIR = Path(__file__).resolve().parents[1] / "snapshots"
 
 
 def snapshot_path(flow: str, position: int, branch: int = 0) -> Path:
-    """Name an action exit by flow, position and execution branch."""
+    """Name an action exit by flow, execution branch and position."""
     if not flow.isidentifier():
         raise ValueError("snapshot flow name must be a nonempty identifier")
     if type(position) is not int or position < 0:
         raise ValueError("snapshot position must be a nonnegative integer")
     if type(branch) is not int or branch < 0:
         raise ValueError("snapshot branch must be a nonnegative integer")
-    return SNAPSHOT_DIR / f"{flow}_{position}.{branch}.snap"
+    return SNAPSHOT_DIR / f"{flow}_{branch}.{position}.snap"
 
 
 # Legacy loading paths for inactive AP/InitProc origins; no longer generated.

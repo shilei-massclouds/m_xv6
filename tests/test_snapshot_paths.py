@@ -12,8 +12,8 @@ def test_snapshot_path_uses_configured_directory(
 ):
     monkeypatch.setattr(snapshot_paths, "SNAPSHOT_DIR", tmp_path)
 
-    assert snapshot_paths.snapshot_path("example", 12, 3) == (
-        tmp_path / "example_12.3.snap"
+    assert snapshot_paths.snapshot_path("example", position=12, branch=3) == (
+        tmp_path / "example_3.12.snap"
     )
 
 

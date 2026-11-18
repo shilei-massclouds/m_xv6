@@ -46,7 +46,7 @@ class TaskLocalEnv:
     snapshot_position: int = 0
     snapshot_branch: int = 0
     snapshot_candidates: list[SnapshotCandidate] = field(default_factory=list)
-    # Execution range configuration; step skipping will be implemented separately.
+    # Reserved configuration; breakpoint restoration is not implemented yet.
     range: tuple[int, int] | None = None
 
 
@@ -72,6 +72,10 @@ class Signal:
     def handle(self) -> Any:
         system = self.source if self.target == "self" else _get_target_ref(self.target)
         action = getattr(system, self.action)
+        if hasattr(action, "__spec_action__"):
+            from framework.interpreter import Interpreter
+
+            return Interpreter().run(self)
         system.acquire(self.env, self.action)
         try:
             return action(self.env, **self.args)
@@ -87,8 +91,8 @@ class Signal:
 
         path = snapshot_paths.snapshot_path(
             self.env.name,
-            self.env.snapshot_position,
-            self.env.snapshot_branch,
+            branch=self.env.snapshot_branch,
+            position=self.env.snapshot_position,
         )
         save_snapshot(gv, path, checkpoint=path.stem, model_version=MODEL_VERSION)
         self.env.snapshot_position += 1
