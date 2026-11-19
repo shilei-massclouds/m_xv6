@@ -25,7 +25,9 @@ I/O 点只由 spec 的 Actions 操作行触发。裸操作执行前记录 I 点�
 
 派生分支首个 I 的 `base` 是基准 I 点名，`input_snapshot` 是 BP 候选快照路径。其他 I 点的 `base` 为 `null`。基准 I 点的运行状态暂存在本次推导的内存中，`break` O 点继续持久化 Env、Frame 和 Signal 队列。详见 [framework/SPEC.md](framework/SPEC.md)。
 
-操作失败、契约失败或 StepPoint 不生成对应 O 点；已经成功的内部操作输出保留。I 写入失败时不执行操作；O 保存失败时不消耗 O 序号、不覆盖已有文件、不回滚 GV。异常后停止该上下文的后续执行，保护域和 Frame 正常清理。现有同 Flow 的记录和输出不会被覆盖，再次首轮运行前需执行 `make clean_snap`；该命令递归清理生成记录、快照和临时文件，保留说明文件。
+主入口的 I 点记录在内存中逐条追加，分支和续跑共用这份历史。推导结束或因可被程序处理的错误退出时，每个 Flow 原子写出一次 `records.json`。强制终止可能丢失尚未写盘的 I 点。单独调用 `FlowRun` 时仍逐点写盘。
+
+操作失败、契约失败或 StepPoint 不生成对应 O 点；已经成功的内部操作输出保留。只有 I 点记录成功后才执行操作。O 保存失败时保留原编号和已有文件。异常后清理保护域和 Frame。再次首轮运行前可用 `make clean_snap` 清理生成记录、快照和临时文件。
 
 InitProc 已有 spec，仍不接入 `main.py`。如需手动运行，在已准备好的 GV 上创建 `InitProcOrigin(source="bp")` 或 `InitProcOrigin(source="ap")`，并在 `with FlowRun(gv, origin.env, MODEL_VERSION):` 中调用 `origin.start()`。`source` 仅保留来源标记，不加载快照；`FlowRun` 本身也不重置 GV，独立初始化由 `main.py` 负责。
 

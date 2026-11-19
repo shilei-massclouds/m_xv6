@@ -7,9 +7,10 @@ import hashlib
 import json
 import os
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Self
 
@@ -22,6 +23,9 @@ from framework.spec import ActionSite, Specification
 RECORD_VERSION = 1
 _ROOT = Path(__file__).resolve().parents[1]
 _CURRENT: ContextVar[FlowRun | None] = ContextVar("spec_flow_run", default=None)
+_INPUT_BATCH: ContextVar[dict[Path, _BufferedHistory] | None] = ContextVar(
+    "spec_input_batch", default=None
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +45,99 @@ class Fork:
 
 
 type CaptureInput = Callable[[str, bytes], None]
+type InputRecords = list[dict[str, Any]]
+
+
+@dataclass
+class _BufferedHistory:
+    flow: str
+    model_version: int
+    directory_fd: int
+    records: InputRecords | None = None
+    fingerprints: dict[str, str] = field(default_factory=dict)
+    disk_digest: str | None = None
+    dirty: bool = False
+
+
+@contextmanager
+def buffer_input_records() -> Iterator[None]:
+    """Share I point history across runs, publishing it on context exit."""
+    if _INPUT_BATCH.get() is not None or _CURRENT.get() is not None:
+        raise RuntimeError("input record batches must enclose their FlowRun contexts")
+    histories: dict[Path, _BufferedHistory] = {}
+    token = _INPUT_BATCH.set(histories)
+    try:
+        yield
+    finally:
+        _INPUT_BATCH.reset(token)
+        # Keep each history locked until its export. Try every history even
+        # when execution or another export fails.
+        with ExitStack() as exports:
+            for path, history in histories.items():
+                exports.callback(os.close, history.directory_fd)
+                if history.dirty and history.records is not None:
+                    exports.callback(
+                        _write_records,
+                        path,
+                        history.flow,
+                        history.model_version,
+                        history.records,
+                        history.fingerprints,
+                    )
+
+
+def _lock_directory(directory: Path, flow: str) -> int:
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BaseException as error:
+        os.close(fd)
+        if isinstance(error, BlockingIOError):
+            raise SnapshotError(f"flow {flow!r} is already running") from error
+        raise
+    return fd
+
+
+def _write_records(
+    path: Path,
+    flow: str,
+    model_version: int,
+    records: InputRecords,
+    fingerprints: dict[str, str],
+) -> None:
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=".records.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary_path = Path(stream.name)
+            json.dump(
+                {
+                    "format_version": RECORD_VERSION,
+                    "model_version": model_version,
+                    "flow": flow,
+                    "spec_fingerprints": fingerprints,
+                    "points": records,
+                },
+                stream,
+                ensure_ascii=False,
+                indent=2,
+                allow_nan=False,
+            )
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, path)
+    except Exception as error:
+        raise SnapshotError(f"cannot write I point records {path}: {error}") from error
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def require_run(env: TaskLocalEnv) -> FlowRun:
@@ -76,7 +173,7 @@ class FlowRun:
         self.input_position = 0
         self.output_position = 0
         self.latest_output = ""
-        self.records: list[dict[str, Any]] = []
+        self.records: InputRecords = []
         self.spec_fingerprints: dict[str, str] = {}
         self.active = False
         self.failed = False
@@ -88,6 +185,27 @@ class FlowRun:
         self.fork = fork
         self.capture_input = capture_input
         self._directory_fd: int | None = None
+        self._buffered: _BufferedHistory | None = None
+
+    def _lock_history(self, directory: Path) -> None:
+        batch = _INPUT_BATCH.get()
+        if batch is None:
+            self._directory_fd = _lock_directory(directory, self.env.name)
+            return
+        path = self._records_path.resolve()
+        history = batch.get(path)
+        if history is None:
+            history = _BufferedHistory(
+                self.env.name,
+                self.model_version,
+                _lock_directory(directory, self.env.name),
+            )
+            batch[path] = history
+        elif history.model_version != self.model_version:
+            raise SnapshotCompatibilityError(
+                "incompatible model version in input batch"
+            )
+        self._buffered = history
 
     def __enter__(self) -> Self:
         if self._entered or _CURRENT.get() is not None:
@@ -98,14 +216,8 @@ class FlowRun:
         directory = inputs.parent
         if self._history is None and self.fork is None:
             directory.mkdir(parents=True, exist_ok=True)
-        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as error:
-                raise SnapshotError(
-                    f"flow {self.env.name!r} is already running"
-                ) from error
+            self._lock_history(directory)
             if self._history is not None:
                 self._restore_history(*self._history)
             elif self.fork is not None:
@@ -121,12 +233,17 @@ class FlowRun:
                 inputs.mkdir(exist_ok=True)
                 outputs.mkdir(exist_ok=True)
                 self._save_output(None)
-                self._write_records(self.records, self.spec_fingerprints)
+                if self._buffered is None:
+                    self._persist(self.records, self.spec_fingerprints)
+                else:
+                    self._buffered.records = self.records
+                    self._buffered.fingerprints = self.spec_fingerprints
+                    self._buffered.dirty = True
         except BaseException:
-            os.close(fd)
+            if self._directory_fd is not None:
+                os.close(self._directory_fd)
             self.failed = True
             raise
-        self._directory_fd = fd
         self.active = True
         self._token = _CURRENT.set(self)
         return self
@@ -138,11 +255,16 @@ class FlowRun:
         self.active = False
         assert self._token is not None
         _CURRENT.reset(self._token)
-        assert self._directory_fd is not None
-        os.close(self._directory_fd)
+        if self._directory_fd is not None:
+            os.close(self._directory_fd)
         self._pending.clear()
 
-    def _load_records(self) -> bytes:
+    def _load_records(self) -> str | None:
+        cached = self._buffered
+        if cached is not None and cached.records is not None:
+            self.records = cached.records
+            self.spec_fingerprints = cached.fingerprints
+            return cached.disk_digest
         try:
             data = self._records_path.read_bytes()
             document = json.loads(data)
@@ -158,7 +280,12 @@ class FlowRun:
             raise SnapshotCompatibilityError(
                 f"invalid history for {self.env.name}: {error}"
             ) from error
-        return data
+        digest = hashlib.sha256(data).hexdigest()
+        if cached is not None:
+            cached.records = self.records
+            cached.fingerprints = self.spec_fingerprints
+            cached.disk_digest = digest
+        return digest
 
     def _branch_records(self, branch: int) -> list[dict[str, Any]]:
         prefix = f"{self.env.name}_{branch}."
@@ -203,9 +330,9 @@ class FlowRun:
             snapshot_paths.snapshot_path(flow, i, position.branch).name
             for i in range(position.output_position)
         }
-        data = self._load_records()
+        disk_digest = self._load_records()
         records = self._branch_records(position.branch)
-        digests = {self._digest(records), hashlib.sha256(data).hexdigest()}
+        digests = {self._digest(records), disk_digest}
         if position.records_digest not in digests or outputs != expected:
             raise SnapshotCompatibilityError(
                 "checkpoint is not the latest break in an unchanged branch history"
@@ -229,44 +356,10 @@ class FlowRun:
         self._pending = set(position.pending)
         self.latest_output = last.relative_to(snapshot_paths.SNAPSHOT_DIR).as_posix()
 
-    def _write_records(
-        self, records: list[dict[str, Any]], fingerprints: dict[str, str]
-    ) -> None:
-        temporary_path: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=self._records_path.parent,
-                prefix=".records.",
-                suffix=".tmp",
-                delete=False,
-            ) as stream:
-                temporary_path = Path(stream.name)
-                json.dump(
-                    {
-                        "format_version": RECORD_VERSION,
-                        "model_version": self.model_version,
-                        "flow": self.env.name,
-                        "spec_fingerprints": fingerprints,
-                        "points": records,
-                    },
-                    stream,
-                    ensure_ascii=False,
-                    indent=2,
-                    allow_nan=False,
-                )
-                stream.write("\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary_path, self._records_path)
-        except Exception as error:
-            raise SnapshotError(
-                f"cannot write I point records {self._records_path}: {error}"
-            ) from error
-        finally:
-            if temporary_path is not None:
-                temporary_path.unlink(missing_ok=True)
+    def _persist(self, records: InputRecords, fingerprints: dict[str, str]) -> None:
+        _write_records(
+            self._records_path, self.env.name, self.model_version, records, fingerprints
+        )
 
     def begin(
         self,
@@ -285,9 +378,9 @@ class FlowRun:
                 if path.is_relative_to(_ROOT)
                 else str(path)
             )
-            fingerprints = dict(self.spec_fingerprints)
-            previous = fingerprints.setdefault(filename, specification.fingerprint)
-            if previous != specification.fingerprint:
+            fingerprint = specification.fingerprint
+            previous = self.spec_fingerprints.get(filename, fingerprint)
+            if previous != fingerprint:
                 raise ValueError(f"spec changed within the run: {filename}")
             name = f"{self.env.name}_{self.branch}.{self.input_position}"
             base = (
@@ -308,13 +401,20 @@ class FlowRun:
                 "operation": {"kind": kind, "text": site.text},
                 "input": InputEncoder(self.root, self.env).fields(values),
             }
-            records = [*self.records, record]
-            self._write_records(records, fingerprints)
+            if self._buffered is None:
+                records = [*self.records, record]
+                fingerprints = {**self.spec_fingerprints, filename: fingerprint}
+                self._persist(records, fingerprints)
+                self.records = records
+                self.spec_fingerprints = fingerprints
+            else:
+                self.records.append(record)
+                self.spec_fingerprints[filename] = fingerprint
+                self._buffered.dirty = True
+                self._buffered.disk_digest = None
         except BaseException:
             self.failed = True
             raise
-        self.records = records
-        self.spec_fingerprints = fingerprints
         self.input_position += 1
         self._pending.add(name)
         return name

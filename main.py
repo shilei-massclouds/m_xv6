@@ -5,7 +5,7 @@ from collections import Counter
 
 from framework import snapshot_paths
 from framework.engine import FlowPaused, StepPoint
-from framework.flow_run import CaptureInput, FlowRun
+from framework.flow_run import CaptureInput, FlowRun, buffer_input_records
 from framework.interpreter import fork_input, resume_checkpoint
 from framework.snapshot import SnapshotError
 from global_vars import MODEL_VERSION, gv
@@ -13,6 +13,7 @@ from origins.ap_init_origin import ApInitOrigin
 from origins.bp_init_origin import BpInitOrigin
 
 
+@buffer_input_records()
 def main() -> None:
     derive_line(BpInitOrigin)
     candidates = snapshot_paths.branch_outputs("bp", 0)

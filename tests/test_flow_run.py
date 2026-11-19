@@ -3,6 +3,7 @@
 import json
 import sys
 import textwrap
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
@@ -13,7 +14,7 @@ import pytest
 from framework import flow_run, snapshot_paths
 from framework.contracts import ContractViolation
 from framework.engine import FlowPaused, StepPoint, System, TaskLocalEnv
-from framework.flow_run import FlowRun, require_run
+from framework.flow_run import FlowRun, buffer_input_records, require_run
 from framework.input_encoding import InputEncodingError
 from framework.interpreter import Continuation, fork_input, resume_checkpoint
 from framework.snapshot import (
@@ -676,7 +677,10 @@ def test_break_requires_a_cpu_flow(root, tmp_path):
     assert run.output_position == 1
 
 
-def test_fork_both_entry_points_with_independent_candidate_gvs(root, tmp_path):
+@pytest.mark.parametrize("buffered", [False, True])
+def test_fork_both_entry_points_with_independent_candidate_gvs(
+    root, tmp_path, monkeypatch, buffered
+):
     cpu_model(
         root,
         tmp_path,
@@ -701,39 +705,57 @@ def test_fork_both_entry_points_with_independent_candidate_gvs(root, tmp_path):
     root.smp_started.signaled = False
     original = [path.read_bytes() for path in candidates]
 
-    anchors: dict[str, bytes] = {}
-    with (
-        pytest.raises(FlowPaused) as initial,
-        FlowRun(
-            root, TaskLocalEnv(name="example"), 1, capture_input=anchors.__setitem__
-        ) as run,
-    ):
-        System().drive(run.env, "worker", "start")
-    with pytest.raises(FlowPaused) as retry:
-        resume_checkpoint(
-            root, initial.value.checkpoint, 1, capture_input=anchors.__setitem__
-        )
-    assert list(anchors) == ["example_0.0", "example_0.3"]
-    baseline = points()
+    record_path = snapshot_paths.input_records_path("example")
+    writes = []
+    replace = flow_run.os.replace
 
-    for i, (base, execution) in enumerate(anchors.items()):
-        with pytest.raises(FlowPaused):
-            fork_input(root, base, execution, candidates[0], 1)
-        assert root.worker.state.name == "BUSYCHECK"
-        assert not root.worker.history
-        fork_input(root, base, execution, candidates[1], 1)
-        assert root.worker.state.name == "RUNNING"
-        assert root.worker.history == [1]
+    def track_record_publish(source, destination):
+        if destination == record_path:
+            writes.append(destination)
+        return replace(source, destination)
+
+    monkeypatch.setattr(flow_run.os, "replace", track_record_publish)
+    anchors: dict[str, bytes] = {}
+    with buffer_input_records() if buffered else nullcontext():
+        with (
+            pytest.raises(FlowPaused) as initial,
+            FlowRun(
+                root, TaskLocalEnv(name="example"), 1, capture_input=anchors.__setitem__
+            ) as run,
+        ):
+            System().drive(run.env, "worker", "start")
+        with pytest.raises(FlowPaused) as retry:
+            resume_checkpoint(
+                root, initial.value.checkpoint, 1, capture_input=anchors.__setitem__
+            )
+        assert list(anchors) == ["example_0.0", "example_0.3"]
+        baseline = list(run.records) if buffered else points()
+        for base, execution in anchors.items():
+            with pytest.raises(FlowPaused):
+                fork_input(root, base, execution, candidates[0], 1)
+            assert root.worker.state.name == "BUSYCHECK"
+            assert not root.worker.history
+            fork_input(root, base, execution, candidates[1], 1)
+            assert root.worker.state.name == "RUNNING"
+            assert root.worker.history == [1]
+        if buffered:
+            assert not record_path.exists()
+            assert not writes
+
+    if buffered:
+        assert writes == [record_path]
+    records = points()
+    for i, base in enumerate(anchors):
         for offset, path in enumerate(candidates):
             point = next(
                 record
-                for record in points()
+                for record in records
                 if record["name"] == f"example_{i * 2 + offset + 1}.0"
             )
             assert point["base"] == base
             assert point["input_snapshot"] == f"candidate/outputs/{path.name}"
             assert point["operation"]["kind"] == ("drive" if i == 0 else "emit")
-    assert points()[: len(baseline)] == baseline
+    assert records[: len(baseline)] == baseline
     assert [path.read_bytes() for path in candidates] == original
     # Forks leave the original branch's last checkpoint available to resume.
     with pytest.raises(FlowPaused):
@@ -779,3 +801,37 @@ def test_fork_reuses_prepared_signal_and_selected_contract(root, tmp_path):
     with pytest.raises(SnapshotCompatibilityError, match="incompatible type.*worker"):
         fork_input(root, "example_0.0", anchors["example_0.0"], incompatible, 1)
     assert points() == before
+
+
+def test_buffered_records_publish_on_contract_failure(root, tmp_path):
+    model(
+        root,
+        tmp_path,
+        """
+        Prop value: int = 0
+        Def good():
+            Actions:
+                self.value += 1
+        Def fail():
+            Requires:
+                False
+            Actions:
+                pass
+        Def start():
+            Actions:
+                drive("self", "fail")
+        """,
+    )
+    with pytest.raises(ContractViolation), buffer_input_records():
+        with FlowRun(root, TaskLocalEnv(name="good"), 1) as run:
+            System().drive(run.env, "worker", "good")
+        assert not snapshot_paths.input_records_path("good").exists()
+        with FlowRun(root, TaskLocalEnv(name="example"), 1) as run:
+            System().drive(run.env, "worker", "start")
+
+    assert points("good")[0]["operation"]["text"] == "self.value += 1"
+    failed = points()
+    assert len(failed) == 1 and failed[0]["operation"]["kind"] == "drive"
+    assert snapshot_paths.branch_outputs("example", 0) == [
+        snapshot_paths.snapshot_path("example", 0)
+    ]
