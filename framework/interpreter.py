@@ -23,6 +23,7 @@ from framework.snapshot import (
 from framework.spec import (
     Branch,
     Expression,
+    Instruction,
     Method,
     SpecError,
     Specification,
@@ -46,6 +47,7 @@ class Frame:
 @dataclass
 class Drive:
     queue: deque[Signal]
+    # Nested calls from private methods have no I point to complete.
     caller_point: str | None = None
     first: bool = True
     result: Any = None
@@ -165,7 +167,7 @@ class Interpreter:
             drives, self.drives = self.drives, []
             with ExitStack() as cleanup:
                 for index, drive in enumerate(drives):
-                    if drive.caller_point is not None:
+                    if index > 0:
                         cleanup.callback(self._close_drive, run.env, drive)
                     if index < len(frames):
                         cleanup.callback(self._close, frames[index], error)
@@ -339,11 +341,15 @@ class Interpreter:
             case _:
                 raise SpecError(f"unknown instruction {instruction.operation}")
 
-    def _action(self, frame: Frame, instruction, signal: Signal | None) -> None:
+    def _record_input(
+        self,
+        run: FlowRun,
+        frame: Frame,
+        instruction: Instruction,
+        signal: Signal | None,
+    ) -> str:
         assert instruction.site is not None
         operation = instruction.operation
-        env = frame.signal.env
-        run = require_run(env)
         values = (
             {
                 "source": signal.source,
@@ -376,7 +382,7 @@ class Interpreter:
                 run.capture_input = None
             saved = InputState(
                 self.owner,
-                env,
+                run.env,
                 self._frame_states(),
                 self.drives,
                 self._spec_fingerprints(),
@@ -384,19 +390,35 @@ class Interpreter:
                 run.pending_before(point),
                 signal,
             )
-            capture(point, freeze_input(run.root, env, saved))
+            capture(point, freeze_input(run.root, run.env, saved))
+        return point
+
+    def _action(
+        self, frame: Frame, instruction: Instruction, signal: Signal | None
+    ) -> None:
+        operation = instruction.operation
+        env = frame.signal.env
+        run = require_run(env)
+        point = None
+        if not (
+            frame.method.name.startswith("_") and operation in {"statement", "drive"}
+        ):
+            point = self._record_input(run, frame, instruction, signal)
 
         if signal is None:
             node = instruction.node
             if operation == "break":
+                assert point is not None and instruction.site is not None
                 self._break(
                     run, frame, point, node.value.args[0], instruction.site.line
                 )
             self._statement(frame, node)
-            run.complete(point)
+            if point is not None:
+                run.complete(point)
         else:
             signal.queue.append(signal)
             if operation == "emit":
+                assert point is not None
                 run.complete(point)
             else:
                 depth = env.depth
@@ -439,13 +461,14 @@ class Interpreter:
     def _finish_drive(self, run: FlowRun, drive: Drive) -> None:
         assert not drive.first
         self.drives.pop()
-        if drive.caller_point is not None:
+        if self.drives:
             self._close_drive(run.env, drive)
             parent = self.frames[-1]
             receiver = self._drive_receiver(parent)
             if receiver is not None:
                 self._assign(parent, receiver, drive.result)
-            run.complete(drive.caller_point)
+            if drive.caller_point is not None:
+                run.complete(drive.caller_point)
 
     def _check_ensures(self, frame: Frame) -> None:
         assert frame.branch is not None
@@ -517,7 +540,9 @@ class Interpreter:
             saved.history.pending if isinstance(saved, Continuation) else saved.pending
         )
         if saved.drives[0].caller_point is not None or pending != {
-            drive.caller_point for drive in saved.drives[1:]
+            point
+            for drive in saved.drives[1:]
+            if (point := drive.caller_point) is not None
         }:
             raise SnapshotCompatibilityError("invalid pending drives in continuation")
         self.owner = saved.owner

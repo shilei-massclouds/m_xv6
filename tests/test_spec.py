@@ -63,10 +63,11 @@ def test_original_proc_table_spec_returns_selected_item(
     root.table.table.extend(items)
     env = TaskLocalEnv(name="example")
 
-    result = execute(root, env, "table", "_pick_runnable")
+    result = execute(root, env, "table", "pick_runnable")
 
     assert result == (items[0] if items else None)
     assert root.table.table == items[1:]
+    assert point_count() == 1
     restored = SpecRoot()
     load_snapshot(
         restored,
@@ -117,7 +118,7 @@ def test_nested_drives_assign_results_before_continuing(root: SpecRoot, tmp_path
 
     assert result == 6
     assert root.worker.value == 10
-    assert point_count() == 6
+    assert point_count() == 2
     assert env.depth == 0
 
 
@@ -241,7 +242,7 @@ def test_exception_unwinds_guards_and_nested_frames(root: SpecRoot, tmp_path: Pa
 
     assert repr(env.cv) == before
     assert env.depth == 0
-    assert point_count() == 1
+    assert point_count() == 0
     assert not env.signal_queues
 
 
@@ -363,11 +364,10 @@ def test_conditional_expressions_are_rejected_in_declarations_and_contracts(
 
 
 @pytest.mark.parametrize(
-    "assignment,snapshot_count",
-    [("result = 3", 1), ('result = drive("self", "_value")', 2)],
+    "assignment", ["result = 3", 'result = drive("self", "_value")']
 )
 def test_declared_output_leaves_guard_before_ensures(
-    root: SpecRoot, tmp_path: Path, assignment: str, snapshot_count: int
+    root: SpecRoot, tmp_path: Path, assignment: str
 ):
     path = write_spec(
         tmp_path,
@@ -390,7 +390,7 @@ def test_declared_output_leaves_guard_before_ensures(
     assert execute(root, env, "worker", "_check") == 3
     assert env.cv.local_irq == 0
     assert env.cv.remote_tasks == 0
-    assert point_count() == snapshot_count
+    assert point_count() == 0
     assert env.depth == 0
     assert not env.signal_queues
 
@@ -460,7 +460,7 @@ def test_signal_callback_survives_snapshot_restore(root: SpecRoot, tmp_path: Pat
     execute(root, TaskLocalEnv(name="example"), "worker", "install")
 
     restored = SpecRoot()
-    load_snapshot(restored, snapshot_paths.snapshot_path("example", 2), model_version=1)
+    load_snapshot(restored, snapshot_paths.snapshot_path("example", 1), model_version=1)
 
     assert restored.worker is not root.worker
     assert restored.worker.callback.__self__ is restored.worker

@@ -126,7 +126,7 @@ def output(position, flow="example", branch=0):
 
 
 @pytest.mark.parametrize("action", ["start", "_start"])
-def test_only_actions_operations_create_points_and_nested_drives_complete_in_order(
+def test_action_points_follow_the_declaring_method_and_drive_completion_order(
     root, tmp_path, action
 ):
     path = model(
@@ -140,15 +140,15 @@ def test_only_actions_operations_create_points_and_nested_drives_complete_in_ord
                 self.value = 1
                 with GuardSpinLock(env.cv, self):
                     assert self.value == 1
-                    drive("self", "empty")
+                    drive("self", "observe")
                     self.value = drive("self", "_value")
                 pass
             Ensures:
                 self.value == 7 and env.cv.local_irq == 0
 
-        Def empty():
+        Def observe():
             Actions:
-                pass
+                self.value += 1
 
         Def _value() -> result:
             Actions:
@@ -156,22 +156,33 @@ def test_only_actions_operations_create_points_and_nested_drives_complete_in_ord
     """,
     )
     env = TaskLocalEnv(name="example")
-    with FlowRun(root, env, 1) as run:
+    captured: dict[str, bytes] = {}
+    with FlowRun(
+        root, env, 1, capture_input=captured.__setitem__, capture_all_inputs=True
+    ) as run:
         System().drive(env, "worker", action)
 
     records = points()
-    assert [point["operation"]["text"] for point in records] == [
-        "self.value = 1",
-        'drive("self", "empty")',
-        'self.value = drive("self", "_value")',
-        "result = 7",
-    ]
-    assert [point["name"] for point in records] == [f"example_0.{i}" for i in range(4)]
+    if action == "_start":
+        operations = ["self.value += 1"]
+        input_positions = [0]
+        values = [0, 2]
+        origins = [None, "example_0.0"]
+    else:
+        operations = [
+            "self.value = 1",
+            'drive("self", "observe")',
+            "self.value += 1",
+            'self.value = drive("self", "_value")',
+        ]
+        input_positions = [0, 1, 1, 3]
+        values = [0, 1, 2, 2, 7]
+        origins = [None, "example_0.0", "example_0.2", "example_0.1", "example_0.3"]
+    names = [f"example_0.{i}" for i in range(len(operations))]
+    assert [point["operation"]["text"] for point in records] == operations
+    assert [point["name"] for point in records] == list(captured) == names
     assert [point["input_snapshot"] for point in records] == [
-        "example/outputs/example_0.0.snap",
-        "example/outputs/example_0.1.snap",
-        "example/outputs/example_0.2.snap",
-        "example/outputs/example_0.2.snap",
+        f"example/outputs/example_0.{i}.snap" for i in input_positions
     ]
     for point in records:
         assert point["base"] is None
@@ -179,16 +190,11 @@ def test_only_actions_operations_create_points_and_nested_drives_complete_in_ord
             path.read_text().splitlines()[point["location"]["line"] - 1].strip()
             == point["operation"]["text"]
         )
-    states = [output(i) for i in range(5)]
-    assert [state.worker.value for state, _ in states] == [0, 1, 1, 1, 7]
-    assert [meta.get("input_point") for _, meta in states] == [
-        None,
-        "example_0.0",
-        "example_0.1",
-        "example_0.3",
-        "example_0.2",
-    ]
-    assert (run.input_position, run.output_position) == (4, 5)
+    states = [output(i) for i in range(len(values))]
+    assert [state.worker.value for state, _ in states] == values
+    assert [meta.get("input_point") for _, meta in states] == origins
+    assert (run.input_position, run.output_position) == (len(operations), len(values))
+    assert root.worker.value == 7
     assert env.depth == 0 and not env.signal_queues
     assert all(stack == [None] for stack in env.cv.stacks.values())
 
@@ -228,8 +234,8 @@ def test_failed_operations_have_no_output_and_completed_child_outputs_survive(
         Def start():
             Actions:
                 with GuardSpinLock(env.cv, self):
-                    drive("self", "_child")
-        Def _child():
+                    drive("self", "child")
+        Def child():
             Actions:
                 self.value = 1
                 {failure}
@@ -258,7 +264,11 @@ def test_failed_callee_ensures_does_not_complete_calling_drive(root, tmp_path):
         Prop value: int = 0
         Def start():
             Actions:
-                drive("self", "_child")
+                drive("self", "_outer")
+        Def _outer():
+            Actions:
+                with GuardSpinLock(env.cv, self):
+                    drive("self", "_child")
         Def _child():
             Actions:
                 self.value = 1
@@ -269,9 +279,13 @@ def test_failed_callee_ensures_does_not_complete_calling_drive(root, tmp_path):
     env = TaskLocalEnv(name="example")
     with pytest.raises(ContractViolation), FlowRun(root, env, 1) as run:
         System().drive(env, "worker", "start")
-    assert len(points()) == 2
-    assert run.output_position == 2
-    assert output(1)[1].get("input_point") == "example_0.1"
+    assert [point["operation"]["text"] for point in points()] == [
+        'drive("self", "_outer")'
+    ]
+    assert run.output_position == 1
+    assert root.worker.value == 1
+    assert env.depth == 0 and not env.signal_queues
+    assert all(stack == [None] for stack in env.cv.stacks.values())
 
 
 def test_release_failure_does_not_complete_calling_drive(root, tmp_path, monkeypatch):
@@ -615,11 +629,14 @@ def test_resume_preserves_pending_emits_and_primary_return_value(root, tmp_path)
         """
         Def start():
             Actions:
-                self.result = drive("self", "first")
+                self.result = drive("self", "_dispatch")
                 self.history.append(4)
             Ensures:
                 self.state is CpuFlowState.BUSYCHECK
-        Def first() -> result:
+        Def _dispatch() -> result:
+            Actions:
+                result = drive("self", "_first")
+        Def _first() -> result:
             Actions:
                 emit("other", "pause")
                 emit("self", "record")
@@ -635,6 +652,10 @@ def test_resume_preserves_pending_emits_and_primary_return_value(root, tmp_path)
         """,
     )
     path = start_with_break(root)
+    _, _, saved = read_snapshot(root, path, model_version=1)
+    assert isinstance(saved, Continuation)
+    assert saved.history.pending == {"example_0.0"}
+    assert [drive.caller_point for drive in saved.drives] == [None, "example_0.0", None]
     assert root.worker.result == 0
     assert root.worker.history == []
     assert root.other.history == [1]
