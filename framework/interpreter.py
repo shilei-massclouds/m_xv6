@@ -8,6 +8,7 @@ import operator
 from collections import deque
 from contextlib import ExitStack
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -70,12 +71,20 @@ class FrameState:
 
 
 @dataclass
+class Restart:
+    system: SpecSystem
+    signal: Signal
+    state: Enum
+
+
+@dataclass
 class ExecutionState:
     owner: SpecSystem | None
     env: TaskLocalEnv
     frames: list[FrameState]
     drives: list[Drive]
     specs: dict[Path, str]
+    restart: Restart | None = field(default=None, kw_only=True)
 
 
 @dataclass
@@ -367,7 +376,7 @@ class Interpreter:
                 },
             }
         )
-        point = run.begin(
+        return run.begin(
             frame.specification,
             frame.method.name,
             frame.branch_index,
@@ -375,6 +384,15 @@ class Interpreter:
             "bare" if operation == "statement" else operation,
             values,
         )
+
+    def _capture_input(
+        self,
+        run: FlowRun,
+        point: str,
+        signal: Signal | None,
+        *,
+        restart: Restart | None = None,
+    ) -> None:
         if (capture := run.capture_input) is not None:
             if not self.can_pause:
                 raise SpecError("capturing an I point requires a resumable spec stack")
@@ -385,13 +403,13 @@ class Interpreter:
                 run.env,
                 self._frame_states(),
                 self.drives,
-                self._spec_fingerprints(),
+                self._spec_fingerprints(restart),
                 point,
                 run.pending_before(point),
                 signal,
+                restart=restart,
             )
             capture(point, freeze_input(run.root, run.env, saved))
-        return point
 
     def _action(
         self, frame: Frame, instruction: Instruction, signal: Signal | None
@@ -404,14 +422,14 @@ class Interpreter:
             frame.method.name.startswith("_") and operation in {"statement", "drive"}
         ):
             point = self._record_input(run, frame, instruction, signal)
+            if operation != "break" or len(instruction.node.value.args) == 1:
+                self._capture_input(run, point, signal)
 
         if signal is None:
             node = instruction.node
             if operation == "break":
                 assert point is not None and instruction.site is not None
-                self._break(
-                    run, frame, point, node.value.args[0], instruction.site.line
-                )
+                self._break(run, frame, point, node.value.args, instruction.site.line)
             self._statement(frame, node)
             if point is not None:
                 run.complete(point)
@@ -477,10 +495,12 @@ class Interpreter:
         ):
             self._violation(frame, "ensures", frame.branch.ensures)
 
-    def _spec_fingerprints(self) -> dict[Path, str]:
+    def _spec_fingerprints(self, restart: Restart | None = None) -> dict[Path, str]:
         fingerprints: dict[Path, str] = {}
         for frame in self.frames:
             fingerprints.update(frame.system.__spec_registry__.spec_fingerprints)
+        if restart is not None:
+            fingerprints.update(restart.system.__spec_registry__.spec_fingerprints)
         return fingerprints
 
     def _frame_states(self) -> list[FrameState]:
@@ -497,8 +517,39 @@ class Interpreter:
             for frame in self.frames
         ]
 
+    def _restart_index(
+        self, frame: Frame, target_expr: ast.expr, action_expr: ast.expr
+    ) -> int:
+        target = self._eval(frame, target_expr)
+        action = self._eval(frame, action_expr)
+        if not isinstance(target, str) or not isinstance(action, str):
+            raise SpecError("break restart target and action must be strings")
+        try:
+            system = frame.system if target == "self" else _get_target_ref(target)
+        except AttributeError as error:
+            raise SpecError(f"unknown break restart target {target!r}") from error
+        for index in range(len(self.frames) - 1, -1, -1):
+            active = self.frames[index]
+            if active.system is system and active.signal.action == action:
+                return index
+        raise SpecError(f"break restart {target}.{action} must be an active call")
+
+    def _unwind_to_restart(self, run: FlowRun, index: int, state: Enum) -> Restart:
+        target = self.frames[index]
+        # The target's original drive remains pending. Descendant calls were
+        # abandoned; keep their I records but do not publish completion O points.
+        while len(self.frames) > index:
+            self._close(self.frames.pop())
+            if len(self.drives) > index + 1:
+                drive = self.drives.pop()
+                self._close_drive(run.env, drive)
+                if drive.caller_point is not None:
+                    run.abandon(drive.caller_point)
+        self.drives[-1].queue.appendleft(target.signal)
+        return Restart(target.system, target.signal, state)
+
     def _break(
-        self, run: FlowRun, frame: Frame, point: str, expression: ast.expr, line: int
+        self, run: FlowRun, frame: Frame, point: str, args: list[ast.expr], line: int
     ) -> None:
         owner = self.owner
         if owner is None or not self.can_pause:
@@ -510,32 +561,80 @@ class Interpreter:
         )
         if contract is None:
             raise SpecError("break requires an active contract of its CpuFlow instance")
-        state = self._eval(frame, expression)
+        state = self._eval(frame, args[0])
         states = owner.__spec_registry__.namespace.get("CpuFlowState")
         if type(state) is not states:
             raise SpecError("break expects a CpuFlowState")
+        restart_index = (
+            self._restart_index(frame, args[1], args[2]) if len(args) == 3 else None
+        )
         owner.state = state  # pyright: ignore[reportAttributeAccessIssue]
         self._check_ensures(contract)
+        restart = (
+            self._unwind_to_restart(run, restart_index, state)
+            if restart_index is not None
+            else None
+        )
         continuation = Continuation(
             owner=owner,
             env=run.env,
             frames=self._frame_states(),
             drives=self.drives,
-            specs=self._spec_fingerprints(),
+            specs=self._spec_fingerprints(restart),
             history=run.position_after_pause(point),
+            restart=restart,
         )
         path = run.complete(point, continuation=continuation)
+        if restart is not None:
+            self._capture_input(run, point, None, restart=restart)
         raise FlowPaused(point, state, path, (frame.specification.path, line))
 
-    def _restore(self, saved: Continuation | InputState) -> None:
+    def _restore(self, saved: Continuation | InputState, state: dict[str, Any]) -> None:
         env = saved.env
+        restart = saved.restart
         if (
-            not saved.frames
-            or len(saved.frames) != len(saved.drives)
+            not saved.drives
+            or len(saved.frames) + (restart is not None) != len(saved.drives)
             or len(saved.drives) != len(env.signal_queues)
             or env.depth < len(saved.drives)
         ):
             raise SnapshotCompatibilityError("invalid continuation stack")
+        for drive, env_queue in zip(saved.drives, env.signal_queues):
+            if drive.queue is not env_queue or any(
+                signal.env is not env or signal.queue is not drive.queue
+                for signal in drive.queue
+            ):
+                raise SnapshotCompatibilityError(
+                    "invalid Signal or Frame bindings in continuation"
+                )
+        if restart is not None:
+            queue = saved.drives[-1].queue
+            if (
+                not queue
+                or queue[0] is not restart.signal
+                or (isinstance(saved, InputState) and saved.signal is not None)
+            ):
+                raise SnapshotCompatibilityError(
+                    "invalid restart Signal in continuation"
+                )
+            signal = restart.signal
+            target = signal.source
+            if signal.target != "self":
+                name, *members = signal.target.split(".")
+                try:
+                    target = state[name]
+                    for member in members:
+                        target = getattr(target, member)
+                except (KeyError, AttributeError) as error:
+                    raise SnapshotCompatibilityError(
+                        "cannot resolve restart target"
+                    ) from error
+            if target is not restart.system or not hasattr(
+                getattr(target, signal.action, None), "__spec_action__"
+            ):
+                raise SnapshotCompatibilityError(
+                    "invalid restart target in continuation"
+                )
         pending = (
             saved.history.pending if isinstance(saved, Continuation) else saved.pending
         )
@@ -548,19 +647,12 @@ class Interpreter:
         self.owner = saved.owner
         self.drives = saved.drives
         self.can_pause = True
-        for item, drive, env_queue in zip(
-            saved.frames, saved.drives, env.signal_queues
-        ):
+        for item, drive in zip(saved.frames, saved.drives):
             if (
                 item.signal.env is not env
                 or item.signal.queue is not drive.queue
-                or drive.queue is not env_queue
                 or item.locals.get("env") is not env
                 or item.locals.get("self") is not item.system
-                or any(
-                    signal.env is not env or signal.queue is not drive.queue
-                    for signal in drive.queue
-                )
             ):
                 raise SnapshotCompatibilityError(
                     "invalid Signal or Frame bindings in continuation"
@@ -582,7 +674,7 @@ class Interpreter:
                     "invalid continuation instruction position"
                 )
             instruction = branch.instructions[item.position - 1]
-            if len(self.frames) < len(saved.frames) - 1:
+            if len(self.frames) < len(saved.drives) - 1:
                 valid = instruction.operation == "drive"
             elif isinstance(saved, Continuation):
                 valid = instruction.operation == "break"
@@ -610,19 +702,26 @@ class Interpreter:
             )
 
         owner = self.owner
-        if owner is None and isinstance(saved, Continuation):
+        if owner is None and (isinstance(saved, Continuation) or restart is not None):
             raise SnapshotCompatibilityError("continuation lacks its CpuFlow contract")
         if owner is not None:
             cpu_flow = owner.__spec_registry__.types.get("CpuFlow")
             if (
                 cpu_flow is None
                 or not isinstance(owner, cpu_flow)
-                or not any(frame.system is owner for frame in self.frames)
+                or not (
+                    any(frame.system is owner for frame in self.frames)
+                    or (restart is not None and restart.system is owner)
+                )
             ):
                 raise SnapshotCompatibilityError(
                     "continuation lacks its CpuFlow contract"
                 )
-        if self._spec_fingerprints() != saved.specs:
+            if restart is not None and type(restart.state) is not (
+                owner.__spec_registry__.namespace.get("CpuFlowState")
+            ):
+                raise SnapshotCompatibilityError("invalid CpuFlow state in restart")
+        if self._spec_fingerprints(restart) != saved.specs:
             raise SnapshotCompatibilityError(
                 "continuation spec fingerprints do not match"
             )
@@ -652,14 +751,20 @@ def _continue(
     run: FlowRun, state: dict[str, Any], saved: Continuation | InputState
 ) -> Any:
     interpreter = Interpreter()
-    interpreter._restore(saved)
+    interpreter._restore(saved, state)
     env = saved.env
     root_depth = env.depth - len(env.signal_queues)
     with run:
         run.root.__dict__ = state
         try:
+            if saved.restart is not None and isinstance(saved, InputState):
+                assert saved.owner is not None
+                saved.owner.state = saved.restart.state  # pyright: ignore[reportAttributeAccessIssue]
             return interpreter._execute(
-                run, saved if isinstance(saved, InputState) else None
+                run,
+                saved
+                if isinstance(saved, InputState) and saved.restart is None
+                else None,
             )
         finally:
             env.signal_queues.clear()
@@ -674,7 +779,7 @@ def resume_checkpoint(
     capture_input: CaptureInput | None = None,
     capture_all_inputs: bool = False,
 ) -> Any:
-    """Continue from the instruction after the latest saved break."""
+    """Continue from the latest saved break's instruction or restart entry."""
     Interpreter._check_root(root)
     metadata, state, saved = read_snapshot(
         root, path, model_version=model_version, expected_checkpoint=path.stem

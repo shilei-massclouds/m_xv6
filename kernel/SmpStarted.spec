@@ -26,5 +26,4 @@ Def _wait():
     Requires:
         not self.signaled
     Actions:
-        break(CpuFlowState.BUSYCHECK)
-        emit("self", "_wait")
+        break(CpuFlowState.BUSYCHECK, "self", "wait")

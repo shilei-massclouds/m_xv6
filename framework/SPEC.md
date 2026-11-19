@@ -39,7 +39,11 @@ Signal 调用写成 `drive("target", "action", key=value)`，可直接调用或�
 
 方法仍按 `acquire → Requires → Actions → Ensures → release` 执行。非私有方法的裸操作行执行前写 I，成功后保存 O；`drive` 形成 Signal 后写 I，在交付结果后保存 O。私有方法（名称以下划线开头）内的裸操作和 `drive` 行照常执行，但不设点。是否设点只看 Actions 行所属的方法；私有方法调用的非私有方法仍按常规设点。`emit` 维持独立的入队前后设点规则。I 按进入顺序、O 按完成顺序编号。失败操作不产生 O，已保存的内部输出保留。
 
-`break(CpuFlowState.BUSYCHECK)` 单独成行，先写 I，再设置该推导所属 CpuFlow 实例的 `state`。按实例身份选择最内层活动 Frame，检查该 Frame 已选分支的 Ensures。检查通过后写可恢复的 O 点，暂停整条执行链。恢复继续执行 `break` 的下一条指令，待各方法正常完成时再执行其契约和 release。AP 的 `_wait` 用 `emit("self", "_wait")` 排队重试，等待期间保留外层 `wait` 的保护域。
+`break(state)` 和 `break(state, target, action)` 都单独成行，先写 I，再设置所属 CpuFlow 实例的 `state`。按实例身份选择该 CpuFlow 最内层的活动 Frame，检查它已选分支的 Ensures。检查通过后写可恢复的 O 点并暂停。单参数形式保留当前调用栈，续跑从 `break` 后的下一条指令开始。
+
+带恢复入口的 `break` 选中栈上最近的匹配调用；`"self"` 指执行 `break` 的对象。解释器退出该调用及其后代的保护域，不把这些栈帧当作正常返回。断点 O 保存被选中调用的原始 Signal、待交付结果的调用位置，以及剩余栈和 Env。续跑用原实参重新进入该方法，重新检查 CV 和 Requires；已完成的 GV 变化不回滚。被放弃的内部 `drive` 保留 I 记录，没有对应的完成 O；原调用直到正常返回才完成。
+
+AP 的 `_wait` 用 `break(CpuFlowState.BUSYCHECK, "self", "wait")` 退出 `wait` 的保护域。用其他 GV 分叉时，`break` 的 I 记录关联的是退出保护后的恢复入口。候选 GV 可在这里改变 `SmpStarted.signaled`；AP 的 `BUSYCHECK` 和待完成的 `wait` 调用会保留。续跑重新进入 `wait`，按当前通知值继续或再次暂停。
 
 生成的类型和回调函数注册在指定 Python 模块中，因此对象图可以沿用现有 Pickle 快照。统一导出模块为 `flows.model_specs`，新进程导入 `global_vars` 时会自动注册。模型版本保持为 9；删除未使用的 Python 模型及导出壳不改变类型路径，现有版本 9 的快照继续兼容，其他模型版本需重新生成。另一个进程加载这些对象前，必须先注册相同的 spec；spec 内容和类型定义需要兼容。
 

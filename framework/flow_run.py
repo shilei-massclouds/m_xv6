@@ -437,6 +437,11 @@ class FlowRun:
     def pending_before(self, point: str) -> frozenset[str]:
         return frozenset(self._pending - {point})
 
+    def abandon(self, name: str) -> None:
+        """Leave the I record in history without completing its operation."""
+        require_run(self.env)
+        self._pending.remove(name)
+
     def complete(self, name: str, *, continuation: object | None = None) -> Path:
         require_run(self.env)
         if name not in self._pending:

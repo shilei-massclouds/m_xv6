@@ -558,12 +558,13 @@ def test_break_uses_innermost_contract_of_its_owner(root, tmp_path, accept):
     assert state["other"].state.name == "RUNNING"
     assert state["worker"].history == []
     assert meta.get("input_point") == points()[-1]["name"]
-    assert len(saved.history.pending) == 4
-    assert saved.frames[-2].guards[0].target is state["smp_started"]
-    assert saved.frames[-2].guards[0].cv is saved.env.cv
-    assert all(
-        stack[-1] is state["smp_started"] for stack in saved.env.cv.stacks.values()
-    )
+    assert saved.history.pending == {"example_0.0", "example_0.1", "example_0.2"}
+    assert saved.restart is not None
+    assert saved.restart.system is state["smp_started"]
+    assert saved.restart.signal.action == "wait"
+    assert saved.drives[-1].queue[0] is saved.restart.signal
+    assert not any(frame.guards for frame in saved.frames)
+    assert all(stack == [None] for stack in saved.env.cv.stacks.values())
     loaded, _ = output(1)
     assert loaded.worker.state.name == "BUSYCHECK"
 
@@ -595,10 +596,12 @@ def test_wait_resume_preserves_depth_and_finishes_after_notification(
         path = pause.value.checkpoint
         _, _, saved = read_snapshot(root, path, model_version=1)
         assert isinstance(saved, Continuation)
-        assert len(saved.frames) == 3
-        assert saved.env.depth == 3
-        assert saved.history.output_position == 2 + 2 * attempt
-        assert [r["operation"]["kind"] for r in points()[-2:]] == ["emit", "break"]
+        assert len(saved.frames) == 1
+        assert saved.env.depth == 2
+        assert saved.history.pending == {"example_0.0"}
+        assert saved.history.output_position == 2 + attempt
+        assert [r["operation"]["kind"] for r in points()[-2:]] == ["drive", "break"]
+        assert all(stack == [None] for stack in saved.env.cv.stacks.values())
         assert root.worker.history == []
     assert initial_path.read_bytes() == initial_data
     with pytest.raises(SnapshotCompatibilityError, match="latest break"):
@@ -664,6 +667,85 @@ def test_resume_preserves_pending_emits_and_primary_return_value(root, tmp_path)
     assert root.worker.history == [3, 4]
     assert root.other.history == [1, 2]
     assert root.other.state.name == "RUNNING"
+
+
+def test_labeled_break_fork_reuses_original_arguments_and_return_position(
+    root, tmp_path
+):
+    cpu_model(
+        root,
+        tmp_path,
+        """
+        Def start():
+            Actions:
+                self.result = drive("self", "wait_for", value=self.result)
+                self.history.append(self.result)
+        Def wait_for(value) -> result:
+            Actions:
+                with GuardSpinLock(env.cv, self):
+                    result = drive("self", "_read", value=value)
+            Ensures:
+                result == value + 1
+        Def _read(value) -> result:
+            Requires:
+                not gv.smp_started.signaled
+            Actions:
+                break(CpuFlowState.BUSYCHECK, "self", "wait_for")
+            Requires:
+                gv.smp_started.signaled
+            Actions:
+                result = value + 1
+        """,
+    )
+    candidate = snapshot_paths.snapshot_path("candidate", 0)
+    candidate.parent.mkdir(parents=True)
+    root.worker.result = 99
+    root.smp_started.signaled = True
+    save_snapshot(root, candidate, checkpoint=candidate.stem, model_version=1)
+    root.worker.result = 7
+    root.smp_started.signaled = False
+
+    anchors: dict[str, bytes] = {}
+    with (
+        pytest.raises(FlowPaused) as pause,
+        FlowRun(
+            root,
+            TaskLocalEnv("example"),
+            1,
+            capture_input=anchors.__setitem__,
+            capture_all_inputs=True,
+        ) as run,
+    ):
+        System().drive(run.env, "worker", "start")
+    assert root.worker.result == 7 and root.worker.history == []
+    point = pause.value.point
+    fork_input(root, point, anchors[point], candidate, 1)
+
+    assert root.worker.state.name == "BUSYCHECK"
+    assert root.worker.result == 8 and root.worker.history == [8]
+    assert output(1, branch=1)[1].get("input_point") == "example_0.0"
+
+
+def test_labeled_break_rejects_a_restart_outside_the_stack(root, tmp_path):
+    cpu_model(
+        root,
+        tmp_path,
+        """
+        Def start():
+            Actions:
+                break(CpuFlowState.BUSYCHECK, "self", "unused")
+        Def unused():
+            Actions:
+                pass
+        """,
+    )
+    with (
+        pytest.raises(SpecError, match="self.unused must be an active call"),
+        FlowRun(root, TaskLocalEnv("example"), 1) as run,
+    ):
+        System().drive(run.env, "worker", "start")
+    assert root.worker.state.name == "RUNNING"
+    assert run.output_position == 1
 
 
 def test_resume_validates_file_model_and_specs_before_installing_gv(root, tmp_path):
@@ -755,17 +837,21 @@ def test_fork_both_entry_points_with_independent_candidate_gvs(
         with (
             pytest.raises(FlowPaused) as initial,
             FlowRun(
-                root, TaskLocalEnv(name="example"), 1, capture_input=anchors.__setitem__
+                root,
+                TaskLocalEnv(name="example"),
+                1,
+                capture_input=anchors.__setitem__,
+                capture_all_inputs=True,
             ) as run,
         ):
             System().drive(run.env, "worker", "start")
         with pytest.raises(FlowPaused) as retry:
-            resume_checkpoint(
-                root, initial.value.checkpoint, 1, capture_input=anchors.__setitem__
-            )
-        assert list(anchors) == ["example_0.0", "example_0.3"]
+            resume_checkpoint(root, initial.value.checkpoint, 1)
+        assert list(anchors) == ["example_0.0", "example_0.1", "example_0.2"]
+        entries = ["example_0.0", initial.value.point]
         baseline = list(run.records) if buffered else points()
-        for base, execution in anchors.items():
+        for base in entries:
+            execution = anchors[base]
             with pytest.raises(FlowPaused):
                 fork_input(root, base, execution, candidates[0], 1)
             assert root.worker.state.name == "BUSYCHECK"
@@ -780,7 +866,7 @@ def test_fork_both_entry_points_with_independent_candidate_gvs(
     if buffered:
         assert writes == [record_path]
     records = points()
-    for i, base in enumerate(anchors):
+    for i, base in enumerate(entries):
         for offset, path in enumerate(candidates):
             point = next(
                 record
@@ -789,7 +875,8 @@ def test_fork_both_entry_points_with_independent_candidate_gvs(
             )
             assert point["base"] == base
             assert point["input_snapshot"] == f"candidate/outputs/{path.name}"
-            assert point["operation"]["kind"] == ("drive" if i == 0 else "emit")
+            assert point["operation"]["kind"] == "drive"
+            assert point["location"]["method"] == ("start" if i == 0 else "wait")
     assert records[: len(baseline)] == baseline
     assert [path.read_bytes() for path in candidates] == original
     # Forks leave the original branch's last checkpoint available to resume.

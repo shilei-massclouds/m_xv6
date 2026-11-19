@@ -6,7 +6,7 @@ BP、AP 各自使用 `snapshots/<flow>/inputs/records.json` 保存 I 点，使�
 
 设点针对 spec Actions 内的操作行。私有方法内的裸操作和 `drive` 行不设点，非私有方法按原规则设点。`emit` 入队和 `break` 暂停时仍产生各自的 I/O 点。方法边界、保护域声明、内部指令、assert 和 pass 不额外设点。
 
-独立 AP 在等待启动通知时以 `BUSYCHECK` 暂停，`ap_0.1.snap` 是第一个可恢复的 `break` O 点。主入口从该点续跑，发现下一批 I/O 点，直到再次到达同一处 `break`。可恢复快照采用格式 2，把 Env、Frame 和 Signal 队列与 GV 一起保存。普通 O 点采用格式 1，仅保存 GV。
+独立 AP 在等待启动通知时以 `BUSYCHECK` 暂停，`ap_0.1.snap` 是第一个可恢复的 `break` O 点。此时旧的 `wait` 保护域已经退出，原始 `wait` Signal 与待完成的调用位置一并保存。主入口续跑时重新进入 `wait`，直到收到通知或再次到达同一处 `break`。可恢复快照采用格式 2，把 Env、Frame 和 Signal 队列与 GV 一起保存。普通 O 点采用格式 1，仅保存 GV。
 
 `records.json` 包含记录格式版本、模型版本、涉及 spec 的指纹，以及 I 的名称、base、输入快照、源位置和动作输入。派生分支首个 I 的 `base` 指向目标 Flow 中被分叉的 I 点，可能位于分支 0 或上一阶派生分支。`input_snapshot` 指向该分支使用的来源 Flow 候选 O。
 

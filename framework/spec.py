@@ -172,12 +172,13 @@ def _compile_actions(
                             f"{filename}:{node.lineno}: {operation} must be a complete statement"
                         )
                     if operation == "break" and (
-                        len(value.args) != 1
-                        or isinstance(value.args[0], ast.Starred)
+                        len(value.args) not in {1, 3}
+                        or any(isinstance(arg, ast.Starred) for arg in value.args)
                         or value.keywords
                     ):
                         raise SpecError(
-                            f"{filename}:{node.lineno}: break expects one state"
+                            f"{filename}:{node.lineno}: break expects one state, "
+                            "optionally followed by a restart target and action"
                         )
                     for argument in [
                         *value.args,

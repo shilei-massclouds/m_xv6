@@ -10,7 +10,7 @@ python3 main.py
 
 执行 `make` 或 `make run` 会先清理生成数据，再按以下顺序推导。
 
-1. 一阶：每个 Origin 从默认 GV 和自己的 Env 启动。遇到 `break` 时从对应 O 点续跑，发现后续的 I/O 点；同一条线路再次到达同一处 `break` 时保留暂停状态。
+1. 一阶：每个 Origin 从默认 GV 和自己的 Env 启动。遇到 `break` 时从对应 O 点续跑，发现后续的 I/O 点；同一条线路再次到达同一处 `break` 时保留暂停状态。AP 的 `break(CpuFlowState.BUSYCHECK, "self", "wait")` 会先退出旧的 `wait` 保护域，续跑再进入 `wait` 检查通知。
 2. 二阶：对每一对有方向的 Flow，将来源 Flow 的所有一阶 O 点快照分别加载到目标 Flow 的每个一阶 I 点。BP → AP 和 AP → BP 分开推导。
 3. 三阶及以上：对上一阶每条线路新产生的每个 I 点，依次应用尚未参与该线路的各个 Flow 的一阶 O 点快照，最多到输入 Flow 数量对应的阶数。
 
