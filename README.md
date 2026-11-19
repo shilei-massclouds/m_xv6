@@ -21,7 +21,7 @@ I/O 点只由 spec 的 Actions 操作行触发。裸操作执行前记录 I 点�
 
 `TaskLocalEnv` 必须提供当前 Flow 的 `name`，只保存 CV、调用深度和 Signal 队列。`FlowRun(gv, env, model_version)` 独立维护当前分支、I/O 计数器、I 点记录及最近的输出；不再有 Env 候选列表、`handled` 或 `range`。执行 spec 必须处于对应 Env 的活动 `FlowRun` 中；一个上下文可执行多个根 Signal，但不能嵌套或复用。
 
-每个 Flow 在 `snapshots/<flow>/inputs/records.json` 中保存 I 点记录，在 `snapshots/<flow>/outputs/` 中保存 O 点索引和 `break` 文件。I/O 点分别以 `<flow>_<分支号>.<序号>` 独立编号。分支 0 的初始 O 保存默认 GV，其余分支以候选 O 为初始输入，首个完成操作的 O 从 0 编号。O 点的元数据字段 `input_point` 指向来源 I。路径固定相对于仓库根目录。
+每个 Flow 在 `snapshots/<flow>/inputs/records.json` 中保存 I 点记录，在 `snapshots/<flow>/outputs/` 中保存 O 点索引和断点包。I/O 点分别以 `<flow>_<分支号>.<序号>` 独立编号。分支 0 的初始 O 保存默认 GV，其余分支以候选 O 为初始输入，首个完成操作的 O 从 0 编号。O 点的元数据字段 `input_point` 指向来源 I。路径固定相对于仓库根目录。
 
 派生分支首个 I 的 `base` 是基准 I 点名，`input_snapshot` 是 BP 候选快照路径。其他 I 点的 `base` 为 `null`。基准 I 点的运行状态暂存在本次推导的内存中，`break` O 点继续持久化 Env、Frame 和 Signal 队列。详见 [framework/SPEC.md](framework/SPEC.md)。
 
@@ -74,7 +74,9 @@ metadata = load_snapshot(
 
 独立快照由标识行 `M_XV6_SNAPSHOT`、一行 UTF-8 JSON 文件头、一个空行和 Pickle 二进制正文组成。文件头包含格式与模型版本、快照点、UTC 时间、正文 SHA-256 和可选的来源 I 点。
 
-主入口为普通 O 点计算正文 SHA-256，正文相同的 O 点共用 `snapshots/.objects/<摘要>.snap-body`。每个 Flow 的 `outputs/index.json` 保存逻辑 `.snap` 名称及其各自的元数据，推导退出时随 I 点记录一起导出。仍可把原来的 `.snap` 路径传给 `load_snapshot`，加载器会解析索引并验证共享正文。枚举 O 点时用 `snapshot_paths.branch_outputs` 获取逻辑路径。`break` 检查点和单独调用 `save_snapshot` 保存的快照采用独立文件。
+主入口为普通 O 点计算正文 SHA-256，正文相同的 O 点共用 `snapshots/.objects/<摘要>.snap-body`。同一 Flow 的 `break` 检查点合并到 `outputs/breaks.pack`，索引记录每个断点的偏移和长度。推导期间可以从内存恢复，退出时先保存断点包，再发布 O 点索引和 I 点记录。进程被强制终止时，尚未发布的断点可能丢失。
+
+仍可把原来的逻辑 `.snap` 路径传给 `load_snapshot`。加载器按索引定位正文并逐条验证摘要，`snapshot_paths.branch_outputs` 仍按逻辑名称枚举。单独调用 `save_snapshot` 或在批次外运行 `FlowRun` 时，继续使用独立文件。
 
 保存时先写同目录临时文件，完成校验和与文件同步后原子替换目标文件。保存失败不会覆盖原文件；加载会先验证文件头、版本、快照点及正文校验和，完整反序列化成功后再替换实例状态。缺失文件、格式损坏和 I/O 失败抛出 `SnapshotError`；格式损坏和版本/快照点不匹配分别使用其子类 `SnapshotFormatError`、`SnapshotCompatibilityError`，可从 `framework.snapshot` 导入。
 

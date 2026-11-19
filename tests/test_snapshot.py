@@ -6,13 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from framework import snapshot_paths
+from framework import snapshot, snapshot_paths
 from framework.snapshot import (
     SnapshotCompatibilityError,
     SnapshotError,
     SnapshotFormatError,
     deduplicate_outputs,
     load_snapshot,
+    read_snapshot,
     save_output_snapshot,
     save_snapshot,
 )
@@ -116,3 +117,87 @@ def test_output_index_is_published_when_derivation_raises(tmp_path: Path):
         )
         raise RuntimeError("contract failed")
     assert load_snapshot(Root(), output, model_version=9)["checkpoint"] == output.stem
+
+
+def test_break_pack_reads_each_range_in_memory_and_after_publication(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(snapshot_paths, "SNAPSHOT_DIR", tmp_path)
+    first = snapshot_paths.snapshot_path("ap", 0)
+    second = snapshot_paths.snapshot_path("ap", 1)
+    first.parent.mkdir(parents=True)
+    pack = first.parent / "breaks.pack"
+    with deduplicate_outputs(pack_breaks=True):
+        for value, path in enumerate((first, second)):
+            root = Root(value=value)
+            save_output_snapshot(
+                root,
+                path,
+                model_version=9,
+                input_point=f"ap_0.{value}",
+                continuation={"saved": root},
+            )
+            assert not path.exists()
+        assert not pack.exists()
+        assert snapshot_paths.branch_outputs("ap", 0) == [first, second]
+        restored = Root()
+        assert read_snapshot(restored, first, model_version=9)[2] == {"saved": restored}
+
+    assert pack.is_file()
+    for value, path in enumerate((first, second)):
+        restored = Root(value=-1)
+        assert (
+            load_snapshot(restored, path, model_version=9).get("input_point")
+            == f"ap_0.{value}"
+        )
+        assert restored.value == value
+
+    # Damage the second range without affecting reads of the first entry.
+    data = pack.read_bytes()
+    pack.write_bytes(data[:-1] + bytes([data[-1] ^ 1]))
+    load_snapshot(Root(), first, model_version=9)
+    with pytest.raises(SnapshotFormatError, match="checksum mismatch"):
+        load_snapshot(Root(), second, model_version=9)
+    pack.write_bytes(data[:-1])
+    with pytest.raises(SnapshotFormatError, match="range exceeds file size"):
+        load_snapshot(Root(), second, model_version=9)
+
+
+def test_failed_index_publish_leaves_prior_pack_entries_readable(tmp_path, monkeypatch):
+    monkeypatch.setattr(snapshot_paths, "SNAPSHOT_DIR", tmp_path)
+    first = snapshot_paths.snapshot_path("ap", 0)
+    second = snapshot_paths.snapshot_path("ap", 1)
+    first.parent.mkdir(parents=True)
+    index = first.parent / "index.json"
+    with deduplicate_outputs(pack_breaks=True):
+        save_output_snapshot(
+            Root(),
+            first,
+            model_version=9,
+            input_point="ap_0.0",
+            continuation={"first": True},
+        )
+    previous = index.read_bytes()
+    write_atomic = snapshot._write_atomic
+
+    def fail_index(path, data):
+        if path == index:
+            raise SnapshotError("index write failed")
+        write_atomic(path, data)
+
+    with (
+        monkeypatch.context() as patch,
+        pytest.raises(SnapshotError, match="index write failed"),
+        deduplicate_outputs(pack_breaks=True),
+    ):
+        patch.setattr(snapshot, "_write_atomic", fail_index)
+        save_output_snapshot(
+            Root(),
+            second,
+            model_version=9,
+            input_point="ap_0.1",
+            continuation={"second": True},
+        )
+    assert index.read_bytes() == previous
+    assert snapshot_paths.branch_outputs("ap", 0) == [first]
+    assert read_snapshot(Root(), first, model_version=9)[2] == {"first": True}

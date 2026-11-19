@@ -28,6 +28,7 @@ _MAX_HEADER_BYTES = 64 * 1024
 _ROOT_ID = "snapshot_root"
 _INDEX_NAME = "index.json"
 _INDEX_VERSION = 1
+_BREAK_PACK_NAME = "breaks.pack"
 
 
 class SnapshotMetadata(TypedDict):
@@ -52,10 +53,23 @@ class SnapshotCompatibilityError(SnapshotError):
 
 
 @dataclass
+class _BreakPack:
+    published_size: int
+    pending: bytearray = field(default_factory=bytearray)
+
+    def append(self, payload: bytes) -> dict[str, int]:
+        offset = self.published_size + len(self.pending)
+        self.pending.extend(payload)
+        return {"offset": offset, "length": len(payload)}
+
+
+@dataclass
 class _OutputBatch:
+    pack_breaks: bool
     indexes: dict[Path, dict[str, Any]] = field(default_factory=dict)
     dirty: set[Path] = field(default_factory=set)
     checked_bodies: set[Path] = field(default_factory=set)
+    packs: dict[Path, _BreakPack] = field(default_factory=dict)
 
 
 _OUTPUT_BATCH: ContextVar[_OutputBatch | None] = ContextVar(
@@ -64,11 +78,11 @@ _OUTPUT_BATCH: ContextVar[_OutputBatch | None] = ContextVar(
 
 
 @contextmanager
-def deduplicate_outputs() -> Iterator[None]:
-    """Store ordinary FlowRun outputs by digest and publish their logical names."""
+def deduplicate_outputs(*, pack_breaks: bool = False) -> Iterator[None]:
+    """Publish indexed outputs on exit, optionally packing break checkpoints."""
     if _OUTPUT_BATCH.get() is not None:
         raise RuntimeError("output snapshot batches cannot be nested")
-    batch = _OutputBatch()
+    batch = _OutputBatch(pack_breaks)
     token = _OUTPUT_BATCH.set(batch)
     try:
         yield
@@ -76,7 +90,10 @@ def deduplicate_outputs() -> Iterator[None]:
         _OUTPUT_BATCH.reset(token)
         with ExitStack() as exports:
             for index_path in batch.dirty:
-                exports.callback(_write_index, index_path, batch.indexes[index_path])
+                pack = batch.packs.get(index_path.parent / _BREAK_PACK_NAME)
+                exports.callback(
+                    _publish_outputs, index_path, batch.indexes[index_path], pack
+                )
 
 
 def _write_atomic(path: Path, contents: bytes) -> None:
@@ -97,7 +114,22 @@ def _write_atomic(path: Path, contents: bytes) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def _write_index(path: Path, entries: dict[str, Any]) -> None:
+def _publish_outputs(
+    path: Path, entries: dict[str, Any], pack: _BreakPack | None
+) -> None:
+    if pack is not None:
+        pack_path = path.parent / _BREAK_PACK_NAME
+        try:
+            prefix = pack_path.read_bytes()
+        except FileNotFoundError:
+            prefix = b""
+        except OSError as error:
+            raise SnapshotError(f"cannot read {pack_path}: {error}") from error
+        if len(prefix) != pack.published_size:
+            raise SnapshotError(f"break pack changed during derivation: {pack_path}")
+        # Preserve the old offsets so the prior index can still be read until
+        # its replacement is published, including after a failed index write.
+        _write_atomic(pack_path, prefix + pack.pending)
     document = {"version": _INDEX_VERSION, "snapshots": entries}
     _write_atomic(
         path, (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode()
@@ -142,6 +174,40 @@ def indexed_output_names(directory: Path) -> set[str]:
 def _body_path(directory: Path, digest: str) -> Path:
     # A FlowRun output directory is <snapshot root>/<flow>/outputs.
     return directory.resolve().parents[1] / ".objects" / f"{digest}.snap-body"
+
+
+def _append_break(batch: _OutputBatch, path: Path, payload: bytes) -> dict[str, int]:
+    pack = batch.packs.get(path)
+    if pack is None:
+        try:
+            size = path.stat().st_size
+        except FileNotFoundError:
+            size = 0
+        pack = batch.packs[path] = _BreakPack(size)
+    return pack.append(payload)
+
+
+def _read_packed_break(path: Path, span: Any) -> BytesIO:
+    if not isinstance(span, dict):
+        raise SnapshotFormatError("invalid break pack range")
+    offset, length = span.get("offset"), span.get("length")
+    if type(offset) is not int or type(length) is not int or offset < 0 or length <= 0:
+        raise SnapshotFormatError("invalid break pack offset or length")
+    batch = _OUTPUT_BATCH.get()
+    pack = batch.packs.get(path) if batch is not None else None
+    if pack is not None and offset >= pack.published_size:
+        start = offset - pack.published_size
+        if start + length > len(pack.pending):
+            raise SnapshotFormatError("break pack range exceeds buffered data")
+        return BytesIO(pack.pending[start : start + length])
+    with path.open("rb") as stream:
+        if offset + length > os.fstat(stream.fileno()).st_size:
+            raise SnapshotFormatError("break pack range exceeds file size")
+        stream.seek(offset)
+        payload = stream.read(length)
+    if len(payload) != length:
+        raise SnapshotFormatError("truncated break pack payload")
+    return BytesIO(payload)
 
 
 def _bind_method(function: Any, owner: object) -> MethodType:
@@ -330,7 +396,7 @@ def save_output_snapshot(
     if path.exists() or path.name in _index_entries(path.parent):
         raise SnapshotError(f"refusing to overwrite output snapshot {path}")
     batch = _OUTPUT_BATCH.get()
-    if batch is None or continuation is not None:
+    if batch is None or (continuation is not None and not batch.pack_breaks):
         return save_snapshot(
             root,
             path,
@@ -344,29 +410,41 @@ def save_output_snapshot(
         checkpoint=path.stem,
         model_version=model_version,
         input_point=input_point,
-        format_version=FORMAT_VERSION,
+        format_version=FORMAT_VERSION
+        if continuation is None
+        else CONTINUATION_FORMAT_VERSION,
     )
     try:
         stream = BytesIO()
-        _SnapshotPickler(stream, root).dump(vars(root))
+        state = vars(root)
+        payload = (
+            state
+            if continuation is None
+            else {"gv": state, "continuation": continuation}
+        )
+        _SnapshotPickler(stream, root).dump(payload)
         body = stream.getvalue()
         digest = hashlib.sha256(body).hexdigest()
         metadata["payload_sha256"] = digest
-        body_path = _body_path(path.parent, digest)
-        if body_path not in batch.checked_bodies:
-            body_path.parent.mkdir(exist_ok=True)
-            try:
-                previous = body_path.read_bytes()
-            except FileNotFoundError:
-                _write_atomic(body_path, body)
-            else:
-                if previous != body:
-                    raise SnapshotFormatError(
-                        f"snapshot body differs from its digest: {body_path}"
-                    )
-            batch.checked_bodies.add(body_path)
         index_path = path.parent.resolve() / _INDEX_NAME
-        batch.indexes[index_path][path.name] = metadata
+        if continuation is not None:
+            span = _append_break(batch, index_path.parent / _BREAK_PACK_NAME, body)
+            batch.indexes[index_path][path.name] = {**metadata, "pack": span}
+        else:
+            body_path = _body_path(path.parent, digest)
+            if body_path not in batch.checked_bodies:
+                body_path.parent.mkdir(exist_ok=True)
+                try:
+                    previous = body_path.read_bytes()
+                except FileNotFoundError:
+                    _write_atomic(body_path, body)
+                else:
+                    if previous != body:
+                        raise SnapshotFormatError(
+                            f"snapshot body differs from its digest: {body_path}"
+                        )
+                batch.checked_bodies.add(body_path)
+            batch.indexes[index_path][path.name] = metadata
         batch.dirty.add(index_path)
     except Exception as error:
         raise SnapshotError(f"cannot save snapshot {path}: {error}") from error
@@ -456,14 +534,21 @@ def read_snapshot(
                 entry = _index_entries(path.parent).get(path.name)
                 if entry is None:
                     raise
-                metadata = _validate_metadata(entry)
-                if (
-                    metadata["format_version"] != FORMAT_VERSION
-                    or metadata["checkpoint"] != path.stem
-                ):
+                if not isinstance(entry, dict):
                     raise SnapshotFormatError("invalid indexed output metadata")
-                body = _body_path(path.parent, metadata["payload_sha256"])
-                stream = files.enter_context(body.open("rb"))
+                header = dict(entry)
+                span = header.pop("pack", None)
+                metadata = _validate_metadata(header)
+                if metadata["checkpoint"] != path.stem:
+                    raise SnapshotFormatError("invalid indexed output checkpoint")
+                if metadata["format_version"] == FORMAT_VERSION and span is None:
+                    body = _body_path(path.parent, metadata["payload_sha256"])
+                    stream = files.enter_context(body.open("rb"))
+                elif metadata["format_version"] == CONTINUATION_FORMAT_VERSION:
+                    pack_path = path.parent.resolve() / _BREAK_PACK_NAME
+                    stream = files.enter_context(_read_packed_break(pack_path, span))
+                else:
+                    raise SnapshotFormatError("invalid indexed output format")
             else:
                 metadata = _read_header(stream)
             if metadata["format_version"] not in (

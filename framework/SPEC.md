@@ -49,9 +49,9 @@ Signal 调用写成 `drive("target", "action", key=value)`，可直接调用或�
 
 drive 输入描述来源模型、目标、方法和实参；裸操作描述来源模型及当前局部绑定（排除 `self`、`env`）。编码中的 `gv` 路径相对于该 I 绑定的输入快照，支持属性、序列下标、字典键/值位置和绑定方法的所属对象；其他模型实例、容器和绑定方法使用 `objects` 表与 `local` 编号，保留别名和循环。枚举和方法记录可导入类型/函数名称。Env/CV 仅能作为 `environment` 引用，不展开状态；队列及不支持的值明确报错，GV 中含对象成员的集合也会拒绝。路径和 local 编号不代表跨 GV 快照的稳定身份。
 
-每条操作执行前记录 I，O 保存成功后推进输出计数。主入口使用 `buffer_input_records()` 和 `deduplicate_outputs()`，内存中维护 I 点和逻辑 O 点索引。普通 O 点序列化一次，在内存计算 SHA-256，正文按摘要跨 Flow 共用，逻辑名称和来源 I 各自保留。候选和分支历史按逻辑 O 点枚举。退出时各 Flow 原子写出 `outputs/index.json` 和 `inputs/records.json`，异常退出也会导出已有记录。强制终止可能丢失尚未写出的索引和 I 点。单独使用 `FlowRun` 默认逐点原子保存。
+每条操作执行前记录 I，O 保存成功后推进输出计数。主入口使用 `buffer_input_records()` 和 `deduplicate_outputs(pack_breaks=True)`。普通 O 正文按 SHA-256 跨 Flow 共用，逻辑名称和来源 I 各自保留。断点序列化后暂存在内存，同批次可直接恢复。退出时按 Flow 原子保存 `outputs/breaks.pack`，随后发布 `outputs/index.json` 和 `inputs/records.json`。异常退出也会导出已有记录，强制终止可能丢失尚未发布的数据。单独使用 `FlowRun` 默认逐点原子保存。
 
-格式 2 的 `break` O 点在同一个对象图中保存 GV、Env、保护域、Frame、Signal 队列和 I/O 位置。格式 1 为普通 GV 快照。框架内部的 `resume_checkpoint` 仍从原分支最新断点续写。加载会检查模型版本、spec 指纹和该分支的 I/O 历史。普通 GV 加载器可以读取两种格式。
+格式 2 的 `break` O 点在同一个对象图中保存 GV、Env、保护域、Frame、Signal 队列和 I/O 位置。格式 1 为普通 GV 快照。断点包索引为每个逻辑 O 点记录正文偏移和长度，续写保留已发布检查点的偏移。框架内部的 `resume_checkpoint` 仍从原分支最新断点续写。加载会检查正文摘要、模型版本、spec 指纹和该分支的 I/O 历史。普通 GV 加载器可以读取两种格式及独立文件。
 
 `FlowRun` 和 `resume_checkpoint` 的 `capture_input` 回调可以暂存首个 I 点。若该 I 已形成 Signal，暂存包括已求值的实参。`fork_input` 为每份候选 GV 独立恢复 AP 的 Env、Frame、Signal 和保护域，并按 GV 属性路径重新绑定引用。当前候选替换支持有属性路径的对象，按列表或字典位置访问的成员仅用于 I 点记录。候选缺少对应成员或类型不匹配时报告错误。基准 I 点状态在当前进程内复用。
 

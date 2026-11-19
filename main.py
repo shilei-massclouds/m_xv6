@@ -14,7 +14,7 @@ from origins.bp_init_origin import BpInitOrigin
 
 
 @buffer_input_records()
-@deduplicate_outputs()
+@deduplicate_outputs(pack_breaks=True)
 def main() -> None:
     derive_line(BpInitOrigin)
     candidates = snapshot_paths.branch_outputs("bp", 0)

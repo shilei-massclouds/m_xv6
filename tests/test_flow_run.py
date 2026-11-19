@@ -719,7 +719,7 @@ def test_fork_both_entry_points_with_independent_candidate_gvs(
     anchors: dict[str, bytes] = {}
     with (
         buffer_input_records() if buffered else nullcontext(),
-        deduplicate_outputs() if buffered else nullcontext(),
+        deduplicate_outputs(pack_breaks=True) if buffered else nullcontext(),
     ):
         with (
             pytest.raises(FlowPaused) as initial,

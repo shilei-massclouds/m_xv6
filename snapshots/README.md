@@ -10,7 +10,7 @@ BP、AP 各自使用 `snapshots/<flow>/inputs/records.json` 保存 I 点，使�
 
 `records.json` 包含记录格式版本、模型版本、涉及 spec 的指纹，以及 I 的名称、base、输入快照、源位置和动作输入。AP 的派生分支首个 I 以 `base` 指向分支 0 的 `ap_0.0` 或 `ap_0.3`，`input_snapshot` 指向该分支使用的 BP 候选 O。两个基准 I 分别来自默认启动和从第一个 `break` 续跑。
 
-主入口把普通 O 正文存到 `.objects/<SHA-256>.snap-body`，相同正文只保存一次。`outputs/index.json` 将逻辑 `.snap` 文件名映射到包含摘要和来源 I 点的元数据，加载器可直接使用逻辑路径。退出前按 Flow 写出索引和 `records.json`。推导期间索引驻留在内存，强制终止时可能尚未发布。
+主入口把普通 O 正文存到 `.objects/<SHA-256>.snap-body`，相同正文只保存一次。`break` 正文按 Flow 合并到 `outputs/breaks.pack`。`outputs/index.json` 将逻辑 `.snap` 文件名映射到摘要、来源 I 点和断点在包中的位置，加载器可直接使用逻辑路径。推导期间的断点和索引在内存中，退出时按断点包、索引、`records.json` 的顺序发布。强制终止时可能丢失尚未发布的数据。
 
 GV 模型版本保持 9，类型和回调仍注册于 `flows.model_specs`。通用加载器继续支持没有 `input_point` 字段的版本 9 快照；旧的平铺目录和按方法退出编号的文件不能作为新 I/O 历史使用，应清理后重新生成。
 
