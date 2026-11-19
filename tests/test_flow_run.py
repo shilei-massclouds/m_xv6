@@ -12,11 +12,18 @@ import pytest
 
 from framework import flow_run, snapshot_paths
 from framework.contracts import ContractViolation
-from framework.engine import StepPoint, System, TaskLocalEnv
+from framework.engine import FlowPaused, StepPoint, System, TaskLocalEnv
 from framework.flow_run import FlowRun, require_run
 from framework.input_encoding import InputEncodingError
-from framework.snapshot import SnapshotError, load_snapshot
-from framework.spec import SpecRegistry
+from framework.interpreter import Continuation, resume_checkpoint
+from framework.snapshot import (
+    SnapshotCompatibilityError,
+    SnapshotError,
+    SnapshotFormatError,
+    load_snapshot,
+    read_snapshot,
+)
+from framework.spec import SpecError, SpecRegistry
 
 
 @dataclass
@@ -41,6 +48,8 @@ class Root:
     worker: Any = None
     native: NativeTarget = field(default_factory=NativeTarget)
     bad: Any = None
+    other: Any = None
+    smp_started: Any = None
 
 
 @pytest.fixture
@@ -58,6 +67,36 @@ def model(root: Root, tmp_path: Path, source: str):
     path.write_text(textwrap.dedent(source).lstrip())
     root.worker = SpecRegistry([path]).model("IoModel")()
     return path
+
+
+def cpu_model(root: Root, tmp_path: Path, actions: str) -> Path:
+    path = tmp_path / "CpuFlow.spec"
+    path.write_text(
+        """Enum CpuFlowState:
+    RUNNING
+    BUSYCHECK
+Prop state: CpuFlowState = CpuFlowState.RUNNING
+Prop result: int = 0
+Prop history: list[int]
+"""
+        + textwrap.dedent(actions)
+    )
+    wait = Path(__file__).resolve().parents[1] / "kernel" / "SmpStarted.spec"
+    registry = SpecRegistry([path, wait])
+    root.worker = registry.model("CpuFlow")()
+    root.other = registry.model("CpuFlow")()
+    root.smp_started = registry.model("SmpStarted")()
+    return path
+
+
+def start_with_break(root: Root) -> Path:
+    with (
+        pytest.raises(FlowPaused) as pause,
+        FlowRun(root, TaskLocalEnv(name="example"), 1) as run,
+    ):
+        System().drive(run.env, "worker", "start")
+    assert not run.failed
+    return pause.value.checkpoint
 
 
 def points(flow="example"):
@@ -407,3 +446,230 @@ def test_unsupported_input_fails_before_recording_or_handling_call(root, tmp_pat
     assert root.worker.value == 0
     assert points() == []
     assert (run.input_position, run.output_position) == (0, 1)
+
+
+def test_emit_drains_fifo_before_returning_first_result(root, tmp_path):
+    model(
+        root,
+        tmp_path,
+        """
+        Prop result: int = 0
+        Prop history: list[int]
+        Def start():
+            Actions:
+                self.result = drive("self", "first")
+                self.history.append(5)
+        Def first() -> result:
+            Actions:
+                emit("self", "second")
+                emit("self", "record", value=3)
+                self.history.append(1)
+                result = 7
+        Def second() -> result:
+            Actions:
+                emit("self", "record", value=4)
+                self.history.append(2)
+                result = 8
+        Def record(value):
+            Actions:
+                self.history.append(value)
+        """,
+    )
+    with FlowRun(root, TaskLocalEnv(name="example"), 1) as run:
+        System().drive(run.env, "worker", "start")
+    assert root.worker.result == 7
+    assert root.worker.history == [1, 2, 3, 4, 5]
+    records = points()
+    assert [r["operation"]["kind"] for r in records].count("emit") == 3
+    before_return, meta = output(run.output_position - 2)
+    assert before_return.worker.history == [1, 2, 3, 4]
+    assert before_return.worker.result == 7
+    assert meta.get("input_point") == records[0]["name"]
+
+
+@pytest.mark.parametrize("accept", [True, False])
+def test_break_uses_innermost_contract_of_its_owner(root, tmp_path, accept):
+    cpu_model(
+        root,
+        tmp_path,
+        f"""
+        Def start():
+            Actions:
+                drive("self", "scope")
+                self.history.append(1)
+            Ensures:
+                self.history == [1]
+        Def scope():
+            Actions:
+                drive("other", "relay")
+            Ensures:
+                {("self.state is CpuFlowState.BUSYCHECK" if accept else "False")}
+        Def relay():
+            Actions:
+                drive("smp_started", "wait")
+            Ensures:
+                gv.smp_started.signaled
+        """,
+    )
+    if not accept:
+        with (
+            pytest.raises(ContractViolation, match=r"ensures failed.*CpuFlow.scope"),
+            FlowRun(root, TaskLocalEnv(name="example"), 1) as run,
+        ):
+            System().drive(run.env, "worker", "start")
+        assert run.failed
+        assert run.output_position == 1
+        assert points()[-1]["operation"]["kind"] == "break"
+        assert not run.env.signal_queues
+        return
+
+    path = start_with_break(root)
+    meta, state, saved = read_snapshot(root, path, model_version=1)
+    assert isinstance(saved, Continuation)
+    assert saved.owner is state["worker"]
+    assert state["worker"].state.name == "BUSYCHECK"
+    assert state["other"].state.name == "RUNNING"
+    assert state["worker"].history == []
+    assert meta.get("input_point") == points()[-1]["name"]
+    assert len(saved.history.pending) == 4
+    assert saved.frames[-2].guards[0].target is state["smp_started"]
+    assert saved.frames[-2].guards[0].cv is saved.env.cv
+    assert all(
+        stack[-1] is state["smp_started"] for stack in saved.env.cv.stacks.values()
+    )
+    loaded, _ = output(1)
+    assert loaded.worker.state.name == "BUSYCHECK"
+
+
+def test_wait_resume_preserves_depth_and_finishes_after_notification(
+    root, tmp_path, monkeypatch
+):
+    cpu_model(
+        root,
+        tmp_path,
+        """
+        Def start():
+            Requires:
+                self.state is CpuFlowState.RUNNING
+            Actions:
+                drive("smp_started", "wait")
+                self.state = CpuFlowState.RUNNING
+                self.history.append(1)
+            Ensures:
+                self.state is CpuFlowState.BUSYCHECK
+                self.history == [1]
+        """,
+    )
+    path = start_with_break(root)
+    initial_path, initial_data = path, path.read_bytes()
+    for attempt in range(1, 4):
+        with pytest.raises(FlowPaused) as pause:
+            resume_checkpoint(root, path, 1)
+        path = pause.value.checkpoint
+        _, _, saved = read_snapshot(root, path, model_version=1)
+        assert isinstance(saved, Continuation)
+        assert len(saved.frames) == 3
+        assert saved.env.depth == 3
+        assert saved.history.output_position == 2 + 2 * attempt
+        assert [r["operation"]["kind"] for r in points()[-2:]] == ["emit", "break"]
+        assert root.worker.history == []
+    assert initial_path.read_bytes() == initial_data
+    with pytest.raises(SnapshotCompatibilityError, match="latest break"):
+        resume_checkpoint(root, initial_path, 1)
+
+    resumed_environments: list[TaskLocalEnv] = []
+
+    def receive_notification(*args, **kwargs):
+        meta, state, saved = read_snapshot(*args, **kwargs)
+        assert isinstance(saved, Continuation)
+        resumed_environments.append(saved.env)
+        state["smp_started"].signaled = True
+        return meta, state, saved
+
+    monkeypatch.setattr("framework.interpreter.read_snapshot", receive_notification)
+    resume_checkpoint(root, path, 1)
+    assert root.worker.history == [1]
+    assert root.worker.state.name == "RUNNING"
+    (resumed_env,) = resumed_environments
+    assert not resumed_env.signal_queues and resumed_env.depth == 0
+    assert all(stack == [None] for stack in resumed_env.cv.stacks.values())
+
+
+def test_resume_preserves_pending_emits_and_primary_return_value(root, tmp_path):
+    cpu_model(
+        root,
+        tmp_path,
+        """
+        Def start():
+            Actions:
+                self.result = drive("self", "first")
+                self.history.append(4)
+            Ensures:
+                self.state is CpuFlowState.BUSYCHECK
+        Def first() -> result:
+            Actions:
+                emit("other", "pause")
+                emit("self", "record")
+                result = 7
+        Def pause():
+            Actions:
+                self.history.append(1)
+                break(CpuFlowState.BUSYCHECK)
+                self.history.append(2)
+        Def record():
+            Actions:
+                self.history.append(3)
+        """,
+    )
+    path = start_with_break(root)
+    assert root.worker.result == 0
+    assert root.worker.history == []
+    assert root.other.history == [1]
+    resume_checkpoint(root, path, 1)
+    assert root.worker.result == 7
+    assert root.worker.history == [3, 4]
+    assert root.other.history == [1, 2]
+    assert root.other.state.name == "RUNNING"
+
+
+def test_resume_validates_file_model_and_specs_before_installing_gv(root, tmp_path):
+    spec = cpu_model(
+        root,
+        tmp_path,
+        """
+        Def start():
+            Actions:
+                break(CpuFlowState.BUSYCHECK)
+        """,
+    )
+    path = start_with_break(root)
+    content = path.read_bytes()
+    previous = root.worker
+    with pytest.raises(SnapshotCompatibilityError, match="model_version"):
+        resume_checkpoint(root, path, 2)
+    path.write_bytes(content[:-1])
+    with pytest.raises(SnapshotFormatError, match="checksum"):
+        resume_checkpoint(root, path, 1)
+    path.write_bytes(content)
+    spec.write_text(spec.read_text() + "\n# changed\n")
+    with pytest.raises(SnapshotCompatibilityError, match="spec changed"):
+        resume_checkpoint(root, path, 1)
+    assert root.worker is previous
+
+
+def test_break_requires_a_cpu_flow(root, tmp_path):
+    model(
+        root,
+        tmp_path,
+        """
+        Def start():
+            Actions:
+                break("stopped")
+        """,
+    )
+    with (
+        pytest.raises(SpecError, match="requires a CpuFlow"),
+        FlowRun(root, TaskLocalEnv(name="example"), 1) as run,
+    ):
+        System().drive(run.env, "worker", "start")
+    assert run.output_position == 1

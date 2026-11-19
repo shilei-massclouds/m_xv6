@@ -1,8 +1,9 @@
 Enum CpuFlowState:
-    RUNNING = "running"
-    WAITING = "waiting"
-    SWITCHED = "switched"
-    WFI = "wfi"
+    RUNNING
+    WAITING
+    BUSYCHECK
+    SWITCHED
+    WFI
 
 Visibility CPUSCOPE_CV
 Prop state: CpuFlowState = CpuFlowState.RUNNING

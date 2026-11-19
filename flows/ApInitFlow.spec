@@ -1,4 +1,4 @@
-Extends CpuFlow
+Parent CpuFlow
 Prop hartid: int = 1
 
 Def start():
@@ -6,6 +6,7 @@ Def start():
         self.state is CpuFlowState.RUNNING
     Actions:
         drive("smp_started", "wait")
+        self.state = CpuFlowState.RUNNING
         drive("io", "printk")
         drive("ap_hart", "_set_satp")
         drive("ap_hart", "_set_stvec")
@@ -15,3 +16,4 @@ Def start():
     Ensures:
         self.state is CpuFlowState.SWITCHED
         self.state is CpuFlowState.WFI
+        self.state is CpuFlowState.BUSYCHECK

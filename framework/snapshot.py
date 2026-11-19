@@ -16,6 +16,7 @@ from typing import Any, BinaryIO, NotRequired, TypedDict, cast
 
 MAGIC = b"M_XV6_SNAPSHOT\n"
 FORMAT_VERSION = 1
+CONTINUATION_FORMAT_VERSION = 2
 _MAX_HEADER_BYTES = 64 * 1024
 _ROOT_ID = "snapshot_root"
 
@@ -126,6 +127,7 @@ def save_snapshot(
     checkpoint: str,
     model_version: int,
     input_point: str | None = None,
+    continuation: object | None = None,
 ) -> SnapshotMetadata:
     """Save all instance attributes, committing only a fully written file.
 
@@ -140,7 +142,9 @@ def save_snapshot(
         raise ValueError("input_point must be a nonempty string")
     path = Path(path)
     metadata: SnapshotMetadata = {
-        "format_version": FORMAT_VERSION,
+        "format_version": (
+            FORMAT_VERSION if continuation is None else CONTINUATION_FORMAT_VERSION
+        ),
         "model_version": model_version,
         "checkpoint": checkpoint,
         "created_at": datetime.now(UTC).isoformat(),
@@ -163,7 +167,12 @@ def save_snapshot(
             stream.write(_encode_header(metadata))
             stream.write(b"\n")
             payload_offset = stream.tell()
-            _SnapshotPickler(stream, root).dump(vars(root))
+            payload = (
+                vars(root)
+                if continuation is None
+                else {"gv": vars(root), "continuation": continuation}
+            )
+            _SnapshotPickler(stream, root).dump(payload)
             stream.flush()
             stream.seek(payload_offset)
             metadata["payload_sha256"] = hashlib.file_digest(
@@ -184,31 +193,30 @@ def save_snapshot(
     return metadata
 
 
-def load_snapshot(
+def read_snapshot(
     root: object,
     path: str | os.PathLike[str],
     *,
     model_version: int,
     expected_checkpoint: str | None = None,
-) -> SnapshotMetadata:
-    """Validate and deserialize a trusted file, then replace root's state.
-
-    Pickle can execute code: only load files from trusted sources. Existing
-    references to root stay valid; references to its old children stay stale.
-    """
+) -> tuple[SnapshotMetadata, dict[str, Any], object | None]:
+    """Read a trusted snapshot without installing its state on root."""
     path = Path(path)
     try:
         with path.open("rb") as stream:
             metadata = _read_header(stream)
-            for name, expected in (
-                ("format_version", FORMAT_VERSION),
-                ("model_version", model_version),
+            if metadata["format_version"] not in (
+                FORMAT_VERSION,
+                CONTINUATION_FORMAT_VERSION,
             ):
-                actual = metadata[name]
-                if actual != expected:
-                    raise SnapshotCompatibilityError(
-                        f"incompatible {name}: expected {expected!r}, got {actual!r}"
-                    )
+                raise SnapshotCompatibilityError(
+                    f"incompatible format_version: got {metadata['format_version']!r}"
+                )
+            if metadata["model_version"] != model_version:
+                raise SnapshotCompatibilityError(
+                    f"incompatible model_version: expected {model_version!r}, "
+                    f"got {metadata['model_version']!r}"
+                )
             if (
                 expected_checkpoint is not None
                 and metadata["checkpoint"] != expected_checkpoint
@@ -223,11 +231,21 @@ def load_snapshot(
                 raise SnapshotFormatError("snapshot payload checksum mismatch")
             stream.seek(payload_offset)
             try:
-                state = _SnapshotUnpickler(stream, root).load()
+                payload = _SnapshotUnpickler(stream, root).load()
             except Exception as exc:
                 raise SnapshotFormatError(
                     f"cannot deserialize snapshot: {exc}"
                 ) from exc
+            continuation = None
+            state = payload
+            if metadata["format_version"] == CONTINUATION_FORMAT_VERSION:
+                if (
+                    not isinstance(payload, dict)
+                    or payload.keys() != {"gv", "continuation"}
+                    or payload["continuation"] is None
+                ):
+                    raise SnapshotFormatError("invalid continuation payload")
+                state, continuation = payload["gv"], payload["continuation"]
             if not isinstance(state, dict) or any(
                 not isinstance(name, str) for name in state
             ):
@@ -240,6 +258,20 @@ def load_snapshot(
         raise type(exc)(f"cannot load snapshot {path}: {exc}") from exc
     except OSError as exc:
         raise SnapshotError(f"cannot load snapshot {path}: {exc}") from exc
+    return metadata, state, continuation
+
+
+def load_snapshot(
+    root: object,
+    path: str | os.PathLike[str],
+    *,
+    model_version: int,
+    expected_checkpoint: str | None = None,
+) -> SnapshotMetadata:
+    """Validate a trusted file and replace root's state with its GV."""
+    metadata, state, _ = read_snapshot(
+        root, path, model_version=model_version, expected_checkpoint=expected_checkpoint
+    )
     # Assign the deserialized dictionary itself to preserve aliases and cycles
     # involving root.__dict__. No live state is replaced until all checks pass.
     root.__dict__ = state

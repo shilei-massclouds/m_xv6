@@ -2,22 +2,34 @@
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
 import os
 import tempfile
 from contextvars import ContextVar, Token
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
 
 from framework import snapshot_paths
-from framework.engine import TaskLocalEnv
+from framework.engine import FlowPaused, TaskLocalEnv
 from framework.input_encoding import InputEncoder
-from framework.snapshot import SnapshotError, save_snapshot
+from framework.snapshot import SnapshotCompatibilityError, SnapshotError, save_snapshot
 from framework.spec import ActionSite, Specification
 
 RECORD_VERSION = 1
 _ROOT = Path(__file__).resolve().parents[1]
 _CURRENT: ContextVar[FlowRun | None] = ContextVar("spec_flow_run", default=None)
+
+
+@dataclass(frozen=True)
+class RunPosition:
+    branch: int
+    input_position: int
+    output_position: int
+    pending: frozenset[str]
+    records_digest: str
 
 
 def require_run(env: TaskLocalEnv) -> FlowRun:
@@ -34,7 +46,14 @@ def require_run(env: TaskLocalEnv) -> FlowRun:
 
 
 class FlowRun:
-    def __init__(self, root: object, env: TaskLocalEnv, model_version: int):
+    def __init__(
+        self,
+        root: object,
+        env: TaskLocalEnv,
+        model_version: int,
+        *,
+        history: tuple[Path, RunPosition, str] | None = None,
+    ):
         self.root = root
         self.env = env
         self.model_version = model_version
@@ -50,6 +69,8 @@ class FlowRun:
         self._entered = False
         self._pending: set[str] = set()
         self._records_path = snapshot_paths.input_records_path(env.name)
+        self._history = history
+        self._directory_fd: int | None = None
 
     def __enter__(self) -> Self:
         if self._entered or _CURRENT.get() is not None:
@@ -57,31 +78,103 @@ class FlowRun:
         self._entered = True
         inputs = self._records_path.parent
         outputs = snapshot_paths.flow_directory(self.env.name) / "outputs"
-        if any(
-            directory.exists() and any(directory.iterdir())
-            for directory in (inputs, outputs)
-        ):
-            raise SnapshotError(
-                f"flow {self.env.name!r} already has records or outputs; run make clean_snap first; replay is not implemented"
-            )
-        inputs.mkdir(parents=True, exist_ok=True)
-        outputs.mkdir(parents=True, exist_ok=True)
+        directory = inputs.parent
+        if self._history is None:
+            directory.mkdir(parents=True, exist_ok=True)
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            self._save_output(None)
-            self._write_records(self.records, self.spec_fingerprints)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise SnapshotError(
+                    f"flow {self.env.name!r} is already running"
+                ) from error
+            if self._history is not None:
+                self._restore_history(*self._history)
+            else:
+                if any(
+                    folder.exists() and any(folder.iterdir())
+                    for folder in (inputs, outputs)
+                ):
+                    raise SnapshotError(
+                        f"flow {self.env.name!r} already has records or outputs; run make clean_snap for a fresh run"
+                    )
+                inputs.mkdir(exist_ok=True)
+                outputs.mkdir(exist_ok=True)
+                self._save_output(None)
+                self._write_records(self.records, self.spec_fingerprints)
         except BaseException:
+            os.close(fd)
             self.failed = True
             raise
+        self._directory_fd = fd
         self.active = True
         self._token = _CURRENT.set(self)
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self.failed = self.failed or exc_type is not None
+        self.failed = self.failed or (
+            exc_type is not None and not isinstance(exc_value, FlowPaused)
+        )
         self.active = False
         assert self._token is not None
         _CURRENT.reset(self._token)
+        assert self._directory_fd is not None
+        os.close(self._directory_fd)
         self._pending.clear()
+
+    def _restore_history(self, path: Path, position: RunPosition, point: str) -> None:
+        flow = self.env.name
+        last = snapshot_paths.snapshot_path(
+            flow, position.output_position - 1, position.branch
+        )
+        if path.resolve() != last.resolve():
+            raise SnapshotCompatibilityError(
+                "checkpoint must be in its flow's output history"
+            )
+        try:
+            data = self._records_path.read_bytes()
+            outputs = {
+                entry.name
+                for entry in last.parent.glob(f"{flow}_{position.branch}.*.snap")
+            }
+        except OSError as error:
+            raise SnapshotError(f"cannot read history for {flow}: {error}") from error
+        expected = {
+            snapshot_paths.snapshot_path(flow, i, position.branch).name
+            for i in range(position.output_position)
+        }
+        if (
+            hashlib.sha256(data).hexdigest() != position.records_digest
+            or outputs != expected
+        ):
+            raise SnapshotCompatibilityError(
+                "checkpoint is not the latest break in an unchanged branch history"
+            )
+        try:
+            records = json.loads(data)
+            if (
+                records["format_version"] != RECORD_VERSION
+                or records["model_version"] != self.model_version
+                or records["flow"] != flow
+                or len(records["points"]) != position.input_position
+                or records["points"][-1]["name"] != point
+                or records["points"][-1]["operation"]["kind"] != "break"
+                or not position.pending
+                <= {record["name"] for record in records["points"][:-1]}
+            ):
+                raise ValueError("I point records do not match the checkpoint")
+        except (ValueError, TypeError, KeyError, IndexError) as error:
+            raise SnapshotCompatibilityError(
+                f"invalid history for {flow}: {error}"
+            ) from error
+        self.records = records["points"]
+        self.spec_fingerprints = records["spec_fingerprints"]
+        self.branch = position.branch
+        self.input_position = position.input_position
+        self.output_position = position.output_position
+        self._pending = set(position.pending)
+        self.latest_output = last.relative_to(snapshot_paths.SNAPSHOT_DIR).as_posix()
 
     def _write_records(
         self, records: list[dict[str, Any]], fingerprints: dict[str, str]
@@ -168,18 +261,30 @@ class FlowRun:
         self._pending.add(name)
         return name
 
-    def complete(self, name: str) -> None:
+    def position_after_pause(self, name: str) -> RunPosition:
+        return RunPosition(
+            self.branch,
+            self.input_position,
+            self.output_position + 1,
+            frozenset(self._pending - {name}),
+            hashlib.sha256(self._records_path.read_bytes()).hexdigest(),
+        )
+
+    def complete(self, name: str, *, continuation: object | None = None) -> Path:
         require_run(self.env)
         if name not in self._pending:
             raise RuntimeError(f"I point is not pending: {name}")
         try:
-            self._save_output(name)
+            path = self._save_output(name, continuation=continuation)
         except BaseException:
             self.failed = True
             raise
         self._pending.remove(name)
+        return path
 
-    def _save_output(self, input_point: str | None) -> None:
+    def _save_output(
+        self, input_point: str | None, *, continuation: object | None = None
+    ) -> Path:
         path = snapshot_paths.snapshot_path(
             self.env.name, self.output_position, self.branch
         )
@@ -191,6 +296,8 @@ class FlowRun:
             checkpoint=path.stem,
             model_version=self.model_version,
             input_point=input_point,
+            continuation=continuation,
         )
         self.latest_output = path.relative_to(snapshot_paths.SNAPSHOT_DIR).as_posix()
         self.output_position += 1
+        return path

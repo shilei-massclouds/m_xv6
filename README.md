@@ -1,6 +1,6 @@
 # m_xv6
 
-BP、AP 和 InitProc Flow 均由 spec 描述并解释执行，入口分别为 `flows/BpInitFlow.spec`、`flows/ApInitFlow.spec` 和 `flows/InitProcFlow.spec`，依赖对象也由各目录中的 spec 定义。`flows/model_specs.py` 统一注册模型，`global_vars.py` 通过 `new_model(...)` 创建 Flow 及其依赖对象。旧 Python 模型、Flow 导出壳和 Holder 已删除；解释器、框架和启动入口继续由 Python 实现。首个验证输入为 `kernel/ProcTable.spec`；语法、执行语义和验证方式见 [framework/SPEC.md](framework/SPEC.md)。I 点恢复和并发输入调度尚未接入。
+BP、AP 和 InitProc Flow 均由 spec 描述并解释执行，入口分别为 `flows/BpInitFlow.spec`、`flows/ApInitFlow.spec` 和 `flows/InitProcFlow.spec`，依赖对象也由各目录中的 spec 定义。`flows/model_specs.py` 统一注册模型，`global_vars.py` 通过 `new_model(...)` 创建 Flow 及其依赖对象。语法、执行语义和验证方式见 [framework/SPEC.md](framework/SPEC.md)。
 
 当前依次运行 BP、AP 推导：
 
@@ -8,9 +8,15 @@ BP、AP 和 InitProc Flow 均由 spec 描述并解释执行，入口分别为 `f
 python3 main.py
 ```
 
-执行 `make` 或 `make run` 会先清理生成数据，再在同一进程中依次独立运行 BP、AP。每个 Flow 启动前重置 GV、创建默认 Env 和独立的 `FlowRun` 上下文。AP 不复用 BP 的结果，因此默认会在等待启动通知时以 `BUSY_CHECK` 退出；这属于正常推导终点。`make clean` 还会清理 Python 缓存。
+执行 `make` 或 `make run` 会先清理生成数据，再在同一进程中依次独立运行 BP、AP。每个 Flow 启动前重置 GV、创建默认 Env 和独立的 `FlowRun` 上下文。独立运行的 AP 会在等待启动通知时暂停为 `BUSYCHECK`，并打印可恢复的 O 点文件。
 
-I/O 点只由 spec 的 Actions 操作行触发：裸操作执行前记录 I 点，成功后保存 O 点；drive 行在 Signal 参数求值完成后记录 I 点，被调用方法正常通过契约和 release、调用方完成返回值赋值后保存 O 点。内部 Actions 操作继续产生自己的点，方法名是否以 `_` 开头不影响设点。
+```sh
+python3 main.py --resume snapshots/ap/outputs/ap_0.1.snap
+```
+
+恢复使用所选 O 点内的 GV 和执行状态，从 `break` 后一条指令继续，在同一分支追加 I/O 记录。每次使用最新且之后未追加 I/O 的断点。默认 AP 检查点里的通知仍为假，恢复会重新产生一个 `BUSYCHECK` 断点。再次执行 `make run` 会重建历史。
+
+I/O 点只由 spec 的 Actions 操作行触发。裸操作执行前记录 I 点，成功后保存 O 点。`drive` 和 `emit` 在 Signal 参数求值完成后记录 I 点，分别在队列处理完毕并交付结果、以及 Signal 入队后生成 O 点。`break` 通过所属 CpuFlow 实例最内层活动契约的 Ensures 后，保存可恢复的 O 点。内部 Actions 操作各自设点。
 
 方法边界、Requires/Ensures、保护域声明、解释器内部指令、`assert` 和 `pass` 不额外设点。每行裸操作是一个原子操作；Actions 中显式调用同步原语也属于裸操作。普通 Python Signal 调度仍保留，但不自动生成 spec I/O 点。
 
@@ -18,7 +24,7 @@ I/O 点只由 spec 的 Actions 操作行触发：裸操作执行前记录 I 点�
 
 每个 Flow 在 `snapshots/<flow>/inputs/records.json` 中保存 I 点记录，在 `snapshots/<flow>/outputs/` 中保存 GV 快照。I 点从 `<flow>_0.0` 按进入顺序编号；初始 O 点 `<flow>_0.0.snap` 保存运行开始时的 GV，之后按操作完成顺序从 1 编号。I/O 独立计数，不用同名推断对应关系；O 文件头的可选字段 `input_point` 指向来源 I 点，初始 O 没有这个字段。当前仅运行分支 0。路径固定相对于仓库根目录，与工作目录无关。
 
-记录文件包含格式/模型版本、涉及 spec 的指纹，以及各 I 点的名称、`base=null`、输入快照路径、源位置和动作输入。Signal 中的模型、容器和绑定方法使用引用感知编码，Env/Frame/队列不写入记录；详见 [framework/SPEC.md](framework/SPEC.md)。本轮只记录，不提供候选加载、重放或恢复。
+记录文件包含格式/模型版本、涉及 spec 的指纹，以及各 I 点的名称、`base=null`、输入快照路径、源位置和动作输入。Env、Frame 和队列写入 `break` 的 O 点文件，与 GV 共享对象引用。I 点记录的用途是描述操作输入。详见 [framework/SPEC.md](framework/SPEC.md)。
 
 操作失败、契约失败或 StepPoint 不生成对应 O 点；已经成功的内部操作输出保留。I 写入失败时不执行操作；O 保存失败时不消耗 O 序号、不覆盖已有文件、不回滚 GV。异常后停止该上下文的后续执行，保护域和 Frame 正常清理。现有同 Flow 的记录和输出不会被覆盖，再次首轮运行前需执行 `make clean_snap`；该命令递归清理生成记录、快照和临时文件，保留说明文件。
 
@@ -63,7 +69,7 @@ metadata = load_snapshot(
 
 `expected_checkpoint` 可以省略；指定时必须与文件头一致。文件格式版本和模型版本始终检查。通用实现位于 `framework/snapshot.py`，模型版本集中定义为 `global_vars.MODEL_VERSION`；模型结构或语义发生不兼容变化时应提升模型版本。快照文件不包含 Python 类和函数的代码，跨进程加载时需有兼容且可导入的模型代码。
 
-快照保存 `gv` 的全部实例属性，包括动态属性、容器、枚举、绑定方法、共享引用和循环引用。绑定方法保留其函数和所属对象，函数需符合标准 Pickle 的可导入要求。加载时保留当前 `gv` 的身份，并将快照中的根引用绑定到它；内部对象重新创建，当前存在但快照中没有的属性会被删除。外部代码持有的旧内部对象引用仍指向旧对象，需要重新通过 `gv` 取值。未从 `gv` 引用的局部环境不会被保存。
+快照保存 `gv` 的全部实例属性，包括动态属性、容器、枚举、绑定方法、共享引用和循环引用。绑定方法保留其函数和所属对象，函数需符合标准 Pickle 的可导入要求。加载时保留当前 `gv` 的身份，并将快照中的根引用绑定到它。外部代码持有的旧内部对象引用仍指向旧对象，需要重新通过 `gv` 取值。普通快照采用格式 1，`break` 检查点采用格式 2 并同时保存执行环境。通用 `load_snapshot` 可从两种格式提取 GV。
 
 每个文件由固定标识行 `M_XV6_SNAPSHOT`、一行 UTF-8 JSON 文件头、一个空行和未压缩的 Pickle 二进制正文组成。文件头包含 `format_version`、`model_version`、`checkpoint`、UTC 时间 `created_at`、正文校验和 `payload_sha256`，以及可选的来源 `input_point`。每份快照独立保存在磁盘，不建立常驻内存快照库。
 

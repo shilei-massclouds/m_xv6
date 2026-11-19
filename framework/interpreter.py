@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import operator
+from collections import deque
 from contextlib import ExitStack
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from framework.contracts import ContractViolation, Phase
-from framework.engine import Signal, _get_target_ref
-from framework.flow_run import require_run
+from framework.engine import FlowPaused, Signal, TaskLocalEnv, _get_target_ref
+from framework.flow_run import FlowRun, RunPosition, require_run
+from framework.snapshot import SnapshotCompatibilityError, read_snapshot
 from framework.spec import (
     Branch,
     Expression,
@@ -32,9 +36,40 @@ class Frame:
     branch_index: int = 0
     position: int = 0
     guards: list[Any] = field(default_factory=list)
-    receiver: ast.AST | None = None
-    restore_depth: int | None = None
+
+
+@dataclass
+class Drive:
+    queue: deque[Signal]
     caller_point: str | None = None
+    first: bool = True
+    result: Any = None
+
+    def accept(self, result: Any) -> None:
+        if self.first:
+            self.first = False
+            self.result = result
+
+
+@dataclass
+class FrameState:
+    signal: Signal
+    system: SpecSystem
+    locals: dict[str, Any]
+    specification: str
+    branch_index: int
+    position: int
+    guards: list[Any]
+
+
+@dataclass
+class Continuation:
+    owner: SpecSystem
+    env: TaskLocalEnv
+    frames: list[FrameState]
+    drives: list[Drive]
+    specs: dict[Path, str]
+    history: RunPosition
 
 
 class Interpreter:
@@ -42,32 +77,76 @@ class Interpreter:
 
     def __init__(self):
         self.frames: list[Frame] = []
+        self.drives: list[Drive] = []
+        self.owner: SpecSystem | None = None
+        self.can_pause = False
 
     def run(self, signal: Signal) -> Any:
         run = require_run(signal.env)
+        self._check_root(run.root)
+        system = self._target(signal)
+        if isinstance(system, SpecSystem):
+            cpu_flow = system.__spec_registry__.types.get("CpuFlow")
+            if cpu_flow is not None and isinstance(system, cpu_flow):
+                self.owner = system
+        queues = signal.env.signal_queues
+        self.can_pause = len(queues) == 1 and queues[0] is signal.queue
+        signal.queue.appendleft(signal)
+        self.drives.append(Drive(signal.queue))
+        return self._execute(run)
+
+    @staticmethod
+    def _check_root(root: object) -> None:
         from global_vars import gv
 
-        if run.root is not gv:
+        if root is not gv:
             raise RuntimeError("FlowRun root must be the current gv")
+
+    @staticmethod
+    def _target(signal: Signal):
+        return (
+            signal.source if signal.target == "self" else _get_target_ref(signal.target)
+        )
+
+    def _execute(self, run: FlowRun) -> Any:
         try:
-            self._push(signal)
             result = None
-            while self.frames:
+            while self.drives:
+                drive = self.drives[-1]
+                if len(self.frames) < len(self.drives):
+                    if drive.queue:
+                        signal = drive.queue.popleft()
+                        system = self._target(signal)
+                        if hasattr(getattr(system, signal.action), "__spec_action__"):
+                            assert isinstance(system, SpecSystem)
+                            self._push(signal, system)
+                        else:
+                            drive.accept(signal.handle())
+                    else:
+                        self._finish_drive(run, drive)
+                        result = drive.result
+                    continue
                 frame = self.frames[-1]
                 assert frame.branch is not None
                 if frame.position >= len(frame.branch.instructions):
-                    result = self._finish(frame)
+                    drive.accept(self._finish(frame))
                 else:
                     instruction = frame.branch.instructions[frame.position]
                     frame.position += 1
                     self._step(frame, instruction)
             return result
+        except FlowPaused:
+            raise
         except BaseException as error:
             run.failed = True
             frames, self.frames = self.frames, []
+            drives, self.drives = self.drives, []
             with ExitStack() as cleanup:
-                for frame in frames:
-                    cleanup.callback(self._close, frame, error)
+                for index, drive in enumerate(drives):
+                    if drive.caller_point is not None:
+                        cleanup.callback(self._close_drive, run.env, drive)
+                    if index < len(frames):
+                        cleanup.callback(self._close, frames[index], error)
                 raise
 
     def _globals(self, frame: Frame) -> dict[str, Any]:
@@ -102,30 +181,11 @@ class Interpreter:
             branch_index=frame.branch_index if phase == "ensures" else None,
         )
 
-    def _push(
-        self,
-        signal: Signal,
-        receiver: ast.AST | None = None,
-        restore_depth: int | None = None,
-        caller_point: str | None = None,
-    ):
-        system = (
-            signal.source if signal.target == "self" else _get_target_ref(signal.target)
-        )
-        assert isinstance(system, SpecSystem)
+    def _push(self, signal: Signal, system: SpecSystem):
         registry = system.__spec_registry__
         specification, method = registry.method(system, signal.action)
         system.acquire(signal.env, signal.action)
-        frame = Frame(
-            signal,
-            system,
-            specification,
-            method,
-            {},
-            receiver=receiver,
-            restore_depth=restore_depth,
-            caller_point=caller_point,
-        )
+        frame = Frame(signal, system, specification, method, {})
         self.frames.append(frame)
         bound = method.signature.bind(**signal.args)
         bound.apply_defaults()
@@ -227,7 +287,7 @@ class Interpreter:
                 frame.guards.append(guard)
             case "leave":
                 frame.guards.pop().__exit__(None, None, None)
-            case "statement":
+            case "statement" | "break":
                 if instruction.site is None:
                     self._statement(frame, node)
                 else:
@@ -237,7 +297,7 @@ class Interpreter:
                         frame.method.name,
                         frame.branch_index,
                         instruction.site,
-                        "bare",
+                        "break" if instruction.operation == "break" else "bare",
                         {
                             "source": frame.system,
                             "bindings": {
@@ -247,14 +307,18 @@ class Interpreter:
                             },
                         },
                     )
+                    if instruction.operation == "break":
+                        self._break(run, frame, point, node.value.args[0])
                     self._statement(frame, node)
                     run.complete(point)
-            case "drive":
+            case "drive" | "emit":
                 call = node.value
                 assert isinstance(call, ast.Call)
                 args = [self._eval(frame, arg) for arg in call.args]
                 if len(args) != 2:
-                    raise SpecError("drive expects target and action")
+                    raise SpecError(
+                        f"{instruction.operation} expects target and action"
+                    )
                 kwargs = {}
                 for keyword in call.keywords:
                     value = self._eval(frame, keyword.value)
@@ -263,13 +327,18 @@ class Interpreter:
                     else:
                         kwargs[keyword.arg] = value
                 target, action = args
+                if not isinstance(target, str) or not isinstance(action, str):
+                    raise SpecError("Signal target and action must be strings")
+                queue = (
+                    frame.signal.queue if instruction.operation == "emit" else deque()
+                )
                 signal = Signal(
                     frame.system,
                     target,
                     action,
                     kwargs,
                     frame.signal.env,
-                    frame.signal.queue,
+                    queue,
                 )
                 assert instruction.site is not None
                 run = require_run(signal.env)
@@ -278,7 +347,7 @@ class Interpreter:
                     frame.method.name,
                     frame.branch_index,
                     instruction.site,
-                    "drive",
+                    instruction.operation,
                     {
                         "source": signal.source,
                         "target": target,
@@ -286,12 +355,8 @@ class Interpreter:
                         "args": kwargs,
                     },
                 )
-                receiver = node.targets[0] if isinstance(node, ast.Assign) else None
-                system = signal.source if target == "self" else _get_target_ref(target)
-                if not hasattr(getattr(system, action), "__spec_action__"):
-                    value = signal.handle()
-                    if receiver is not None:
-                        self._assign(frame, receiver, value)
+                queue.append(signal)
+                if instruction.operation == "emit":
                     run.complete(point)
                 else:
                     env = signal.env
@@ -300,12 +365,8 @@ class Interpreter:
                         f"{'    ' * depth}{frame.system}:\n{'    ' * (depth + 1)}{action} -> {target}"
                     )
                     env.depth += 1
-                    try:
-                        self._push(signal, receiver, depth, point)
-                    except BaseException:
-                        if not self.frames or self.frames[-1] is frame:
-                            env.depth = depth
-                        raise
+                    env.signal_queues.append(queue)
+                    self.drives.append(Drive(queue, point))
             case _:
                 raise SpecError(f"unknown instruction {instruction.operation}")
 
@@ -318,28 +379,210 @@ class Interpreter:
                     error.__traceback__ if error else None,
                 )
         finally:
+            frame.system.release(frame.signal.env, frame.signal.action)
+
+    @staticmethod
+    def _close_drive(env: TaskLocalEnv, drive: Drive) -> None:
+        assert env.signal_queues[-1] is drive.queue
+        env.signal_queues.pop()
+        env.depth -= 1
+
+    @staticmethod
+    def _drive_receiver(parent: Frame) -> ast.AST | None:
+        assert parent.branch is not None
+        instruction = parent.branch.instructions[parent.position - 1]
+        assert instruction.operation == "drive"
+        return (
+            instruction.node.targets[0]
+            if isinstance(instruction.node, ast.Assign)
+            else None
+        )
+
+    def _finish_drive(self, run: FlowRun, drive: Drive) -> None:
+        assert not drive.first
+        self.drives.pop()
+        if drive.caller_point is not None:
+            self._close_drive(run.env, drive)
+            parent = self.frames[-1]
+            receiver = self._drive_receiver(parent)
+            if receiver is not None:
+                self._assign(parent, receiver, drive.result)
+            run.complete(drive.caller_point)
+
+    def _check_ensures(self, frame: Frame) -> None:
+        assert frame.branch is not None
+        if frame.branch.ensures is not None and not self._conditions(
+            frame, frame.branch.ensures
+        ):
+            self._violation(frame, "ensures", frame.branch.ensures)
+
+    def _spec_fingerprints(self) -> dict[Path, str]:
+        return {
+            spec.path.resolve(): spec.fingerprint
+            for frame in self.frames
+            for spec in frame.system.__spec_registry__.specifications.values()
+        }
+
+    def _break(
+        self, run: FlowRun, frame: Frame, point: str, expression: ast.expr
+    ) -> None:
+        owner = self.owner
+        if owner is None or not self.can_pause:
+            raise SpecError(
+                "break requires a CpuFlow derivation with a resumable spec stack"
+            )
+        contract = next(
+            (active for active in reversed(self.frames) if active.system is owner), None
+        )
+        if contract is None:
+            raise SpecError("break requires an active contract of its CpuFlow instance")
+        state = self._eval(frame, expression)
+        states = owner.__spec_registry__.namespace.get("CpuFlowState")
+        if type(state) is not states:
+            raise SpecError("break expects a CpuFlowState")
+        owner.state = state  # pyright: ignore[reportAttributeAccessIssue]
+        self._check_ensures(contract)
+        continuation = Continuation(
+            owner=owner,
+            env=run.env,
+            frames=[
+                FrameState(
+                    active.signal,
+                    active.system,
+                    active.locals,
+                    active.specification.name,
+                    active.branch_index,
+                    active.position,
+                    active.guards,
+                )
+                for active in self.frames
+            ],
+            drives=self.drives,
+            specs=self._spec_fingerprints(),
+            history=run.position_after_pause(point),
+        )
+        path = run.complete(point, continuation=continuation)
+        raise FlowPaused(point, state, path)
+
+    def _restore(self, saved: Continuation) -> None:
+        env = saved.env
+        if (
+            not saved.frames
+            or len(saved.frames) != len(saved.drives)
+            or len(saved.drives) != len(env.signal_queues)
+            or env.depth < len(saved.drives)
+        ):
+            raise SnapshotCompatibilityError("invalid continuation stack")
+        if saved.drives[0].caller_point is not None or saved.history.pending != {
+            drive.caller_point for drive in saved.drives[1:]
+        }:
+            raise SnapshotCompatibilityError("invalid pending drives in continuation")
+        self.owner = saved.owner
+        self.drives = saved.drives
+        self.can_pause = True
+        for item, drive, env_queue in zip(
+            saved.frames, saved.drives, env.signal_queues
+        ):
+            if (
+                item.signal.env is not env
+                or item.signal.queue is not drive.queue
+                or drive.queue is not env_queue
+                or item.locals.get("env") is not env
+                or item.locals.get("self") is not item.system
+                or any(
+                    signal.env is not env or signal.queue is not drive.queue
+                    for signal in drive.queue
+                )
+            ):
+                raise SnapshotCompatibilityError(
+                    "invalid Signal or Frame bindings in continuation"
+                )
+            registry = item.system.__spec_registry__
             try:
-                frame.system.release(frame.signal.env, frame.signal.action)
-            finally:
-                if frame.restore_depth is not None:
-                    frame.signal.env.depth = frame.restore_depth
+                spec, method = registry.method(item.system, item.signal.action)
+            except (KeyError, SpecError) as error:
+                raise SnapshotCompatibilityError(
+                    "cannot resolve continuation method"
+                ) from error
+            if spec.name != item.specification or not 0 <= item.branch_index < len(
+                method.branches
+            ):
+                raise SnapshotCompatibilityError("invalid continuation contract branch")
+            branch = method.branches[item.branch_index]
+            operation = (
+                "break" if len(self.frames) == len(saved.frames) - 1 else "drive"
+            )
+            if (
+                not 1 <= item.position <= len(branch.instructions)
+                or branch.instructions[item.position - 1].operation != operation
+            ):
+                raise SnapshotCompatibilityError(
+                    "invalid continuation instruction position"
+                )
+            self.frames.append(
+                Frame(
+                    item.signal,
+                    item.system,
+                    spec,
+                    method,
+                    item.locals,
+                    branch,
+                    item.branch_index,
+                    item.position,
+                    item.guards,
+                )
+            )
+
+        cpu_flow = self.owner.__spec_registry__.types.get("CpuFlow")
+        if (
+            cpu_flow is None
+            or not isinstance(self.owner, cpu_flow)
+            or not any(frame.system is self.owner for frame in self.frames)
+        ):
+            raise SnapshotCompatibilityError("continuation lacks its CpuFlow contract")
+        if self._spec_fingerprints() != saved.specs:
+            raise SnapshotCompatibilityError(
+                "continuation spec fingerprints do not match"
+            )
+        for path, fingerprint in saved.specs.items():
+            try:
+                current = hashlib.sha256(path.read_text().encode()).hexdigest()
+            except (OSError, ValueError) as error:
+                raise SnapshotCompatibilityError(
+                    f"cannot validate continuation spec {path}: {error}"
+                ) from error
+            if current != fingerprint:
+                raise SnapshotCompatibilityError(f"continuation spec changed: {path}")
 
     def _finish(self, frame: Frame) -> Any:
         assert frame.branch is not None
         # Protection scopes must be closed before checking postconditions.
         while frame.guards:
             frame.guards.pop().__exit__(None, None, None)
-        if frame.branch.ensures is not None and not self._conditions(
-            frame, frame.branch.ensures
-        ):
-            self._violation(frame, "ensures", frame.branch.ensures)
+        self._check_ensures(frame)
         result = frame.locals[frame.method.result] if frame.method.result else None
         self.frames.pop()
         self._close(frame)
-        if self.frames:
-            parent = self.frames[-1]
-            if frame.receiver is not None:
-                self._assign(parent, frame.receiver, result)
-            if frame.caller_point is not None:
-                require_run(frame.signal.env).complete(frame.caller_point)
         return result
+
+
+def resume_checkpoint(root: object, path: Path, model_version: int) -> Any:
+    """Continue from the instruction after the latest saved break."""
+    Interpreter._check_root(root)
+    metadata, state, saved = read_snapshot(
+        root, path, model_version=model_version, expected_checkpoint=path.stem
+    )
+    point = metadata.get("input_point")
+    if not isinstance(saved, Continuation) or point is None:
+        raise SnapshotCompatibilityError(f"{path} is not a break checkpoint")
+    interpreter = Interpreter()
+    interpreter._restore(saved)
+    env = saved.env
+    root_depth = env.depth - len(env.signal_queues)
+    with FlowRun(root, env, model_version, history=(path, saved.history, point)) as run:
+        root.__dict__ = state
+        try:
+            return interpreter._execute(run)
+        finally:
+            env.signal_queues.clear()
+            env.depth = root_depth

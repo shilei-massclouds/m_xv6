@@ -5,9 +5,11 @@ from __future__ import annotations
 import ast
 import hashlib
 import inspect
+import io
 import re
 import sys
 import textwrap
+import tokenize
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -78,12 +80,30 @@ class Specification:
     fingerprint: str = ""
 
 
-def _drive_call(node: ast.AST | None) -> bool:
-    return (
+_BREAK_NAME = "__spec_break__"
+_SIGNAL_OPERATIONS = {"drive", "emit", _BREAK_NAME}
+
+
+def _action_call(node: ast.AST | None) -> str | None:
+    if (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
-        and node.func.id == "drive"
+        and node.func.id in _SIGNAL_OPERATIONS
+    ):
+        return "break" if node.func.id == _BREAK_NAME else node.func.id
+    return None
+
+
+def _parse_actions(source: str, filename: str) -> list[ast.stmt]:
+    # Python reserves "break". Rewrite its token only, keeping the spec's
+    # physical line numbers and original source for I point records.
+    tokens = (
+        token._replace(string=_BREAK_NAME)
+        if token.type == tokenize.NAME and token.string == "break"
+        else token
+        for token in tokenize.generate_tokens(io.StringIO(source).readline)
     )
+    return ast.parse(tokenize.untokenize(tokens), filename=filename).body
 
 
 def _check_control_syntax(node: ast.AST, filename: str) -> None:
@@ -98,17 +118,23 @@ def _check_control_syntax(node: ast.AST, filename: str) -> None:
             )
 
 
+def _reject_nested_operation(node: ast.AST, filename: str) -> None:
+    for child in ast.walk(node):
+        operation = _action_call(child)
+        if isinstance(child, ast.Name) and child.id == _BREAK_NAME:
+            operation = "break"
+        if operation is not None:
+            form = " or assignment value" if operation == "drive" else ""
+            raise SpecError(
+                f"{filename}:{getattr(node, 'lineno', 0)}: {operation} must be a complete Actions statement{form}"
+            )
+
+
 def _compile_actions(
     nodes: list[ast.stmt], filename: str, source_lines: list[str]
 ) -> list[Instruction]:
     instructions: list[Instruction] = []
     statement_lines: set[int] = set()
-
-    def reject_nested_drive(node: ast.AST):
-        if any(_drive_call(child) for child in ast.walk(node)):
-            raise SpecError(
-                f"{filename}:{getattr(node, 'lineno', 0)}: drive must be a complete statement or assignment value"
-            )
 
     def compile_block(block: list[ast.stmt]):
         for node in block:
@@ -131,30 +157,45 @@ def _compile_actions(
                         raise SpecError(
                             f"{filename}:{node.lineno}: a protection declaration must occupy a single physical line"
                         )
-                    reject_nested_drive(item.context_expr)
+                    _reject_nested_operation(item.context_expr, filename)
                     instructions.append(Instruction("enter", item.context_expr))
                 compile_block(node.body)
                 for _ in node.items:
                     instructions.append(Instruction("leave"))
             elif isinstance(node, (ast.Expr, ast.Assign)):
                 value = node.value
-                if _drive_call(value):
+                operation = _action_call(value)
+                if operation is not None:
                     assert isinstance(value, ast.Call)
+                    if operation != "drive" and not isinstance(node, ast.Expr):
+                        raise SpecError(
+                            f"{filename}:{node.lineno}: {operation} must be a complete statement"
+                        )
+                    if operation == "break" and (
+                        len(value.args) != 1
+                        or isinstance(value.args[0], ast.Starred)
+                        or value.keywords
+                    ):
+                        raise SpecError(
+                            f"{filename}:{node.lineno}: break expects one state"
+                        )
                     for argument in [
                         *value.args,
                         *[keyword.value for keyword in value.keywords],
                     ]:
-                        reject_nested_drive(argument)
+                        _reject_nested_operation(argument, filename)
                     if isinstance(node, ast.Assign) and len(node.targets) != 1:
                         raise SpecError(
                             f"{filename}:{node.lineno}: chained drive assignment"
                         )
-                    instructions.append(Instruction("drive", node, site))
+                    if isinstance(node, ast.Assign):
+                        _reject_nested_operation(node.targets[0], filename)
+                    instructions.append(Instruction(operation, node, site))
                 else:
-                    reject_nested_drive(node)
+                    _reject_nested_operation(node, filename)
                     instructions.append(Instruction("statement", node, site))
             elif isinstance(node, (ast.Pass, ast.Assert, ast.AugAssign, ast.AnnAssign)):
-                reject_nested_drive(node)
+                _reject_nested_operation(node, filename)
                 instructions.append(
                     Instruction(
                         "statement",
@@ -199,6 +240,7 @@ def parse_spec(path: str | Path) -> Specification:
                     declaration = ast.parse(text[5:]).body[0]
                     ast.increment_lineno(declaration, line - 1)
                     _check_control_syntax(declaration, str(path))
+                    _reject_nested_operation(declaration, str(path))
                     if not isinstance(declaration, ast.AnnAssign) or not isinstance(
                         declaration.target, ast.Name
                     ):
@@ -219,8 +261,8 @@ def parse_spec(path: str | Path) -> Specification:
                     spec.properties.append(
                         Property(declaration.target.id, annotation, default)
                     )
-                elif text.startswith("Extends "):
-                    spec.base = text[8:].strip()
+                elif text.startswith(("Parent ", "Extends ")):
+                    spec.base = text.split(maxsplit=1)[1].strip()
                 elif text.startswith("Visibility "):
                     spec.visibility = text[11:].strip()
                 elif text.startswith("ProtectedBy "):
@@ -234,8 +276,17 @@ def parse_spec(path: str | Path) -> Specification:
                         member = lines[index].strip()
                         index += 1
                         if member and not member.startswith("#"):
-                            key, value = member.split("=", 1)
-                            members[key.strip()] = ast.literal_eval(value.strip())
+                            key, separator, value = member.partition("=")
+                            key = key.strip()
+                            if not key.isidentifier() or key in members:
+                                raise SpecError(
+                                    f"invalid or duplicate enum member {key!r}"
+                                )
+                            members[key] = (
+                                ast.literal_eval(value.strip())
+                                if separator
+                                else key.lower()
+                            )
                     if not name.isidentifier() or not members or name in spec.enums:
                         raise SpecError("invalid or duplicate Enum")
                     spec.enums[name] = members
@@ -304,7 +355,7 @@ def parse_spec(path: str | Path) -> Specification:
                         raise SpecError("duplicate Actions section")
                     source = "\n" * start + textwrap.dedent("\n".join(content))
                     branch.instructions = _compile_actions(
-                        ast.parse(source, filename=str(path)).body, str(path), lines
+                        _parse_actions(source, str(path)), str(path), lines
                     )
                 else:
                     expressions = [
@@ -316,6 +367,7 @@ def parse_spec(path: str | Path) -> Specification:
                         parsed_expression = ast.parse(expression.text, mode="eval")
                         ast.increment_lineno(parsed_expression, expression.line - 1)
                         _check_control_syntax(parsed_expression, str(path))
+                        _reject_nested_operation(parsed_expression, str(path))
                     if text == "Requires:":
                         branch.requires = expressions
                     else:
@@ -326,7 +378,7 @@ def parse_spec(path: str | Path) -> Specification:
                 raise SpecError("unexpected indentation")
         if any(not item.branches for item in spec.methods.values()):
             raise SpecError("a method needs at least one section")
-    except (SyntaxError, ValueError, AssertionError) as error:
+    except (SyntaxError, ValueError, AssertionError, tokenize.TokenError) as error:
         raise SpecError(f"{path}:{index}: {error}") from error
     return spec
 

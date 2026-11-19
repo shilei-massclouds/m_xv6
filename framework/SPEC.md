@@ -15,11 +15,11 @@ with FlowRun(gv, env, MODEL_VERSION):
 assert result is None
 ```
 
-`make run` 清理生成数据后分别从默认 GV、Env 独立运行 BP 和 AP；AP 首轮在 `BUSY_CHECK` 结束。InitProc 暂不接入 `main.py`；手动调用也需显式使用 `FlowRun`，该上下文本身复用传入 GV，不自动加载或重置。注册入口的路径相对于仓库根目录解析，不依赖工作目录。GV 模型均通过 `flows.model_specs.new_model(...)` 创建；需要类型或枚举时，使用 `registry.model("CpuFlow")`、`registry.namespace["CpuFlowState"]` 等注册项。
+`make run` 清理生成数据后分别从默认 GV、Env 独立运行 BP 和 AP。AP 首轮在 `BUSYCHECK` 保存可恢复的 O 点。InitProc 暂不接入 `main.py`；手动调用也需显式使用 `FlowRun`，该上下文本身复用传入 GV。注册入口的路径相对于仓库根目录解析。GV 模型均通过 `flows.model_specs.new_model(...)` 创建，需要类型或枚举时使用 `registry.model("CpuFlow")`、`registry.namespace["CpuFlowState"]` 等注册项。
 
 BP 和 AP 继承同一份 `CpuFlow.spec`，调度器通过 `next_runnable = drive("proc_table", "pick_runnable")` 接收 spec 返回值，不再使用 Holder 输出参数。InitProc 的首次执行检查也直接接收 `FirstProc.spec` 的布尔返回值；首次进入时调用文件系统初始化和进程 `_kexec`，最后切换到用户态。
 
-spec 文件名是对象类型名。`Prop table: list[Proc]` 为每个实例创建独立列表；也可以使用 `Prop value: int = 0` 显式指定默认表达式。当前属性注解描述模型，不进行运行时类型检查。枚举通过 `Enum Name:` 声明；`Extends Name` 引用同一 registry 中的另一个 spec。
+spec 文件名是对象类型名。`Prop table: list[Proc]` 为每个实例创建独立列表，也可以使用 `Prop value: int = 0` 显式指定默认表达式。属性注解描述模型。枚举通过 `Enum Name:` 声明，无赋值的成员以名称的小写形式为值。`Parent Name` 和 `Extends Name` 均引用同一 registry 中的另一个 spec。
 
 `Def method(parameters) -> variable:` 定义方法；箭头指定正常完成 Actions 后输出的局部变量，所选分支必须给该变量赋值。spec 禁止 `return`，没有输出声明的方法正常完成时输出 `None`。命名参数支持字面量默认值；未绑定的关键字参数可以通过 `kwargs` 访问。
 
@@ -33,11 +33,13 @@ Actions 支持赋值、属性/下标赋值、表达式语句、`assert`、`pass`
 
 spec 禁止 `if/else` 语句和条件表达式，分支选择通过互斥的 Requires/Actions/Ensures 组表达。如果判断依赖前一个操作或 Signal 的结果，先完成公共前缀，再将结果作为参数交给带分支的方法；不能把这个判断提前到公共前缀执行之前。`CpuFlow.select_next`、`InitProcFlow.first_init` 和 `ProcTable.set_initproc` 是现有示例。
 
-Signal 调用写成 `drive("target", "action", key=value)`，可直接调用或作为赋值右侧；嵌套在其他表达式中的 drive 会在解析时拒绝。`self` 指向发出 Signal 的当前对象；其他 target 从当前 `gv` 解析。spec 不提供 emit。`Visibility CPUSCOPE_CV` 和 `ProtectedBy io` 可声明在类型或方法上，沿用现有竞争检查。
+Signal 调用写成 `drive("target", "action", key=value)`，可直接调用或作为赋值右侧。`emit("target", "action", key=value)` 单独成行，将 Signal 加到当前 `drive` 自己的 FIFO 队列。每个 Signal 的方法完成后，解释器处理队列中的下一项，队列清空时向调用方交付首个 Signal 的结果。`self` 指向发出 Signal 的当前对象，其他 target 从当前 `gv` 解析。`Visibility CPUSCOPE_CV` 和 `ProtectedBy io` 可声明在类型或方法上。
 
-`framework/spec.py` 解析定义并注册对象类型；`framework/interpreter.py` 用循环和显式 Frame 栈推进 Actions。每个 Frame 保存当前 Signal、指令位置、局部变量、契约分支、保护域和返回值接收位置。spec 到 spec 的调用不递归进入 Python 模型方法。框架仍支持 Python Signal 目标；当前 GV 的模型对象全部来自 spec。
+`framework/spec.py` 解析定义并注册对象类型。`framework/interpreter.py` 用循环和显式 Frame 栈推进 Actions。Frame 保存 Signal、指令位置、局部变量、契约分支和保护域。每次 `drive` 的队列还携带未完成的调用位置和已产生的首个结果。框架支持 Python Signal 目标，可恢复的调用链由显式 spec Frame 组成。
 
-方法仍按 `acquire → Requires → Actions → Ensures → release` 执行，方法边界不保存快照。裸操作行执行前写 I，成功后保存 O；drive 行形成 Signal 后写 I，被调用方法正常完成上述流程并赋值返回结果后保存 O。内部操作按相同规则展开，所以 I 按进入顺序、O 按完成顺序分别编号。异常依次清理 Frame 和保护域，失败操作没有 O，成功的内部输出保留。
+方法仍按 `acquire → Requires → Actions → Ensures → release` 执行。裸操作行执行前写 I，成功后保存 O。`drive` 和 `emit` 形成 Signal 后写 I，分别在交付结果和入队时保存 O。内部操作按相同规则展开，所以 I 按进入顺序、O 按完成顺序编号。失败操作不产生 O，已完成的内部输出保留。
+
+`break(CpuFlowState.BUSYCHECK)` 单独成行，先写 I，再设置该推导所属 CpuFlow 实例的 `state`。按实例身份选择最内层活动 Frame，检查该 Frame 已选分支的 Ensures。检查通过后写可恢复的 O 点，暂停整条执行链。恢复继续执行 `break` 的下一条指令，待各方法正常完成时再执行其契约和 release。AP 的 `_wait` 用 `emit("self", "_wait")` 排队重试，等待期间保留外层 `wait` 的保护域。
 
 生成的类型和回调函数注册在指定 Python 模块中，因此对象图可以沿用现有 Pickle 快照。统一导出模块为 `flows.model_specs`，新进程导入 `global_vars` 时会自动注册。模型版本保持为 9；删除未使用的 Python 模型及导出壳不改变类型路径，现有版本 9 的快照继续兼容，其他模型版本需重新生成。另一个进程加载这些对象前，必须先注册相同的 spec；spec 内容和类型定义需要兼容。
 
@@ -49,6 +51,6 @@ drive 输入描述来源模型、目标、方法和实参；裸操作描述来�
 
 I 记录原子写入后才执行操作，O 原子保存后才推进输出计数。持久化失败停止本次推导，不覆盖已完成文件。已有同 Flow 数据时拒绝再次首轮运行，需先清理；输入记录不含完整 Env、Frame 或可恢复执行栈。
 
-当前只完成首轮记录，尚不支持输入描述的恢复解码、并发 GV 加载、重放或 base 分支调度。Frame 栈是后续机制的基础，不代表已实现断点恢复。
+格式 2 的 `break` O 点在同一个对象图中保存 GV、Env、保护域、Frame、Signal 队列和 I/O 位置。格式 1 为普通 GV 快照。用 `python3 main.py --resume <断点文件>` 从当前原样保留的最新断点续写；加载会检查模型版本、spec 指纹及 I/O 历史。普通 GV 加载器可以读取两种格式。本轮续跑范围限于原分支和断点自带的 GV。
 
 验证：`python3 -m pytest -q tests/test_spec.py`；完整检查：`make test`。测试仅保障 framework，`ProcTable.spec` 作为首个语言验证输入。

@@ -5,7 +5,9 @@ from collections import deque
 from collections.abc import Callable
 from copy import copy
 from dataclasses import dataclass, field
+from enum import Enum
 from os import getenv
+from pathlib import Path
 from types import FunctionType
 from typing import Any, cast
 
@@ -103,6 +105,7 @@ class System:
         print(f"{indent}{self}:")
 
         queue: deque[Signal] = deque()
+        queue_depth = len(env.signal_queues)
         env.signal_queues.append(queue)
         env.depth = depth + 1
         try:
@@ -112,7 +115,8 @@ class System:
                 queue.popleft().handle()
             return result
         finally:
-            env.signal_queues.pop()
+            # A paused interpreter has already saved its nested queues.
+            del env.signal_queues[queue_depth:]
             env.depth = depth
 
     def emit(self, env: TaskLocalEnv, target: str, action: str, **kwargs):
@@ -313,6 +317,16 @@ class StepPoint(Exception):
     def __init__(self, point: str, state: str):
         self.point = point
         self.state = state
+
+
+class FlowPaused(Exception):
+    """Transfer a saved continuation to the Python entry point."""
+
+    def __init__(self, point: str, state: Enum, checkpoint: Path):
+        super().__init__(point, state, checkpoint)
+        self.point = point
+        self.state = state
+        self.checkpoint = checkpoint
 
 
 def exit_from(point: str, state: str):
