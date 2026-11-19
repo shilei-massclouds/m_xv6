@@ -76,6 +76,9 @@ class InputEncoder:
         result["objects"] = self.objects
         return result
 
+    def gv_path(self, value: object) -> list[dict[str, Any]] | None:
+        return self._gv_paths.get(id(value))
+
     def _encode(self, value: Any) -> Any:
         if isinstance(value, Enum):
             return {"enum": self._type_name(type(value)), "member": value.name}

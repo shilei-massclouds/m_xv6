@@ -1,4 +1,4 @@
-"""First-run I/O records for operations written in spec Actions sections."""
+"""I/O records and history for spec derivations."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import tempfile
+from collections.abc import Callable
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,16 @@ class RunPosition:
     records_digest: str
 
 
+@dataclass(frozen=True)
+class Fork:
+    base: str
+    candidate: Path
+    pending: frozenset[str]
+
+
+type CaptureInput = Callable[[str, bytes], None]
+
+
 def require_run(env: TaskLocalEnv) -> FlowRun:
     run = _CURRENT.get()
     if run is None or not run.active:
@@ -53,7 +64,11 @@ class FlowRun:
         model_version: int,
         *,
         history: tuple[Path, RunPosition, str] | None = None,
+        fork: Fork | None = None,
+        capture_input: CaptureInput | None = None,
     ):
+        if history is not None and fork is not None:
+            raise ValueError("resume and fork are separate entry points")
         self.root = root
         self.env = env
         self.model_version = model_version
@@ -70,6 +85,8 @@ class FlowRun:
         self._pending: set[str] = set()
         self._records_path = snapshot_paths.input_records_path(env.name)
         self._history = history
+        self.fork = fork
+        self.capture_input = capture_input
         self._directory_fd: int | None = None
 
     def __enter__(self) -> Self:
@@ -79,7 +96,7 @@ class FlowRun:
         inputs = self._records_path.parent
         outputs = snapshot_paths.flow_directory(self.env.name) / "outputs"
         directory = inputs.parent
-        if self._history is None:
+        if self._history is None and self.fork is None:
             directory.mkdir(parents=True, exist_ok=True)
         fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
         try:
@@ -91,6 +108,8 @@ class FlowRun:
                 ) from error
             if self._history is not None:
                 self._restore_history(*self._history)
+            elif self.fork is not None:
+                self._start_fork(self.fork)
             else:
                 if any(
                     folder.exists() and any(folder.iterdir())
@@ -123,6 +142,47 @@ class FlowRun:
         os.close(self._directory_fd)
         self._pending.clear()
 
+    def _load_records(self) -> bytes:
+        try:
+            data = self._records_path.read_bytes()
+            document = json.loads(data)
+            if (
+                document["format_version"] != RECORD_VERSION
+                or document["model_version"] != self.model_version
+                or document["flow"] != self.env.name
+            ):
+                raise ValueError("incompatible I point record header")
+            self.records = document["points"]
+            self.spec_fingerprints = document["spec_fingerprints"]
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            raise SnapshotCompatibilityError(
+                f"invalid history for {self.env.name}: {error}"
+            ) from error
+        return data
+
+    def _branch_records(self, branch: int) -> list[dict[str, Any]]:
+        prefix = f"{self.env.name}_{branch}."
+        return [record for record in self.records if record["name"].startswith(prefix)]
+
+    @staticmethod
+    def _digest(records: list[dict[str, Any]]) -> str:
+        return hashlib.sha256(json.dumps(records, sort_keys=True).encode()).hexdigest()
+
+    def _start_fork(self, fork: Fork) -> None:
+        self._load_records()
+        names = {record["name"] for record in self.records}
+        if fork.base not in names or not fork.pending <= names:
+            raise SnapshotCompatibilityError("fork refers to a missing I point")
+        self.branch = 1 + max(
+            int(name.rsplit("_", 1)[1].split(".")[0]) for name in names
+        )
+        self.latest_output = (
+            fork.candidate.resolve()
+            .relative_to(snapshot_paths.SNAPSHOT_DIR.resolve())
+            .as_posix()
+        )
+        self._pending = set(fork.pending)
+
     def _restore_history(self, path: Path, position: RunPosition, point: str) -> None:
         flow = self.env.name
         last = snapshot_paths.snapshot_path(
@@ -133,7 +193,6 @@ class FlowRun:
                 "checkpoint must be in its flow's output history"
             )
         try:
-            data = self._records_path.read_bytes()
             outputs = {
                 entry.name
                 for entry in last.parent.glob(f"{flow}_{position.branch}.*.snap")
@@ -144,32 +203,26 @@ class FlowRun:
             snapshot_paths.snapshot_path(flow, i, position.branch).name
             for i in range(position.output_position)
         }
-        if (
-            hashlib.sha256(data).hexdigest() != position.records_digest
-            or outputs != expected
-        ):
+        data = self._load_records()
+        records = self._branch_records(position.branch)
+        digests = {self._digest(records), hashlib.sha256(data).hexdigest()}
+        if position.records_digest not in digests or outputs != expected:
             raise SnapshotCompatibilityError(
                 "checkpoint is not the latest break in an unchanged branch history"
             )
         try:
-            records = json.loads(data)
             if (
-                records["format_version"] != RECORD_VERSION
-                or records["model_version"] != self.model_version
-                or records["flow"] != flow
-                or len(records["points"]) != position.input_position
-                or records["points"][-1]["name"] != point
-                or records["points"][-1]["operation"]["kind"] != "break"
-                or not position.pending
-                <= {record["name"] for record in records["points"][:-1]}
+                len(records) != position.input_position
+                or records[-1]["name"] != point
+                or records[-1]["operation"]["kind"] != "break"
+                or point in position.pending
+                or not position.pending <= {record["name"] for record in self.records}
             ):
                 raise ValueError("I point records do not match the checkpoint")
         except (ValueError, TypeError, KeyError, IndexError) as error:
             raise SnapshotCompatibilityError(
                 f"invalid history for {flow}: {error}"
             ) from error
-        self.records = records["points"]
-        self.spec_fingerprints = records["spec_fingerprints"]
         self.branch = position.branch
         self.input_position = position.input_position
         self.output_position = position.output_position
@@ -237,9 +290,14 @@ class FlowRun:
             if previous != specification.fingerprint:
                 raise ValueError(f"spec changed within the run: {filename}")
             name = f"{self.env.name}_{self.branch}.{self.input_position}"
+            base = (
+                self.fork.base
+                if self.fork is not None and self.input_position == 0
+                else None
+            )
             record = {
                 "name": name,
-                "base": None,
+                "base": base,
                 "input_snapshot": self.latest_output,
                 "location": {
                     "file": filename,
@@ -267,8 +325,11 @@ class FlowRun:
             self.input_position,
             self.output_position + 1,
             frozenset(self._pending - {name}),
-            hashlib.sha256(self._records_path.read_bytes()).hexdigest(),
+            self._digest(self._branch_records(self.branch)),
         )
+
+    def pending_before(self, point: str) -> frozenset[str]:
+        return frozenset(self._pending - {point})
 
     def complete(self, name: str, *, continuation: object | None = None) -> Path:
         require_run(self.env)

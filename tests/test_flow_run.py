@@ -15,13 +15,14 @@ from framework.contracts import ContractViolation
 from framework.engine import FlowPaused, StepPoint, System, TaskLocalEnv
 from framework.flow_run import FlowRun, require_run
 from framework.input_encoding import InputEncodingError
-from framework.interpreter import Continuation, resume_checkpoint
+from framework.interpreter import Continuation, fork_input, resume_checkpoint
 from framework.snapshot import (
     SnapshotCompatibilityError,
     SnapshotError,
     SnapshotFormatError,
     load_snapshot,
     read_snapshot,
+    save_snapshot,
 )
 from framework.spec import SpecError, SpecRegistry
 
@@ -673,3 +674,108 @@ def test_break_requires_a_cpu_flow(root, tmp_path):
     ):
         System().drive(run.env, "worker", "start")
     assert run.output_position == 1
+
+
+def test_fork_both_entry_points_with_independent_candidate_gvs(root, tmp_path):
+    cpu_model(
+        root,
+        tmp_path,
+        """
+        Def start():
+            Requires:
+                self.state is CpuFlowState.RUNNING
+            Actions:
+                drive("smp_started", "wait")
+                self.state = CpuFlowState.RUNNING
+                self.history.append(1)
+            Ensures:
+                self.state is CpuFlowState.BUSYCHECK
+                self.history == [1]
+        """,
+    )
+    candidates = [snapshot_paths.snapshot_path("candidate", i) for i in range(2)]
+    candidates[0].parent.mkdir(parents=True)
+    for i, path in enumerate(candidates):
+        root.smp_started.signaled = bool(i)
+        save_snapshot(root, path, checkpoint=path.stem, model_version=1)
+    root.smp_started.signaled = False
+    original = [path.read_bytes() for path in candidates]
+
+    anchors: dict[str, bytes] = {}
+    with (
+        pytest.raises(FlowPaused) as initial,
+        FlowRun(
+            root, TaskLocalEnv(name="example"), 1, capture_input=anchors.__setitem__
+        ) as run,
+    ):
+        System().drive(run.env, "worker", "start")
+    with pytest.raises(FlowPaused) as retry:
+        resume_checkpoint(
+            root, initial.value.checkpoint, 1, capture_input=anchors.__setitem__
+        )
+    assert list(anchors) == ["example_0.0", "example_0.3"]
+    baseline = points()
+
+    for i, (base, execution) in enumerate(anchors.items()):
+        with pytest.raises(FlowPaused):
+            fork_input(root, base, execution, candidates[0], 1)
+        assert root.worker.state.name == "BUSYCHECK"
+        assert not root.worker.history
+        fork_input(root, base, execution, candidates[1], 1)
+        assert root.worker.state.name == "RUNNING"
+        assert root.worker.history == [1]
+        for offset, path in enumerate(candidates):
+            point = next(
+                record
+                for record in points()
+                if record["name"] == f"example_{i * 2 + offset + 1}.0"
+            )
+            assert point["base"] == base
+            assert point["input_snapshot"] == f"candidate/outputs/{path.name}"
+            assert point["operation"]["kind"] == ("drive" if i == 0 else "emit")
+    assert points()[: len(baseline)] == baseline
+    assert [path.read_bytes() for path in candidates] == original
+    # Forks leave the original branch's last checkpoint available to resume.
+    with pytest.raises(FlowPaused):
+        resume_checkpoint(root, retry.value.checkpoint, 1)
+
+
+def test_fork_reuses_prepared_signal_and_selected_contract(root, tmp_path):
+    model(
+        root,
+        tmp_path,
+        """
+        Prop value: int = 1
+        Prop result: int = 0
+        Def start():
+            Requires:
+                self.value == 1
+            Actions:
+                self.result = drive("self", "read", value=self.value)
+        Def read(value) -> result:
+            Actions:
+                result = value
+        """,
+    )
+    candidate = snapshot_paths.snapshot_path("candidate", 0)
+    candidate.parent.mkdir(parents=True)
+    root.worker.value = 2
+    save_snapshot(root, candidate, checkpoint=candidate.stem, model_version=1)
+    root.worker.value = 1
+
+    anchors: dict[str, bytes] = {}
+    with FlowRun(
+        root, TaskLocalEnv(name="example"), 1, capture_input=anchors.__setitem__
+    ) as run:
+        System().drive(run.env, "worker", "start")
+    fork_input(root, "example_0.0", anchors["example_0.0"], candidate, 1)
+    assert root.worker.value == 2
+    assert root.worker.result == 1
+
+    before = points()
+    root.worker = None
+    incompatible = snapshot_paths.snapshot_path("candidate", 1)
+    save_snapshot(root, incompatible, checkpoint=incompatible.stem, model_version=1)
+    with pytest.raises(SnapshotCompatibilityError, match="incompatible type.*worker"):
+        fork_input(root, "example_0.0", anchors["example_0.0"], incompatible, 1)
+    assert points() == before

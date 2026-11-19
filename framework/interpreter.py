@@ -13,8 +13,13 @@ from typing import Any
 
 from framework.contracts import ContractViolation, Phase
 from framework.engine import FlowPaused, Signal, TaskLocalEnv, _get_target_ref
-from framework.flow_run import FlowRun, RunPosition, require_run
-from framework.snapshot import SnapshotCompatibilityError, read_snapshot
+from framework.flow_run import CaptureInput, FlowRun, Fork, RunPosition, require_run
+from framework.snapshot import (
+    SnapshotCompatibilityError,
+    bind_input,
+    freeze_input,
+    read_snapshot,
+)
 from framework.spec import (
     Branch,
     Expression,
@@ -63,13 +68,24 @@ class FrameState:
 
 
 @dataclass
-class Continuation:
-    owner: SpecSystem
+class ExecutionState:
+    owner: SpecSystem | None
     env: TaskLocalEnv
     frames: list[FrameState]
     drives: list[Drive]
     specs: dict[Path, str]
+
+
+@dataclass
+class Continuation(ExecutionState):
     history: RunPosition
+
+
+@dataclass
+class InputState(ExecutionState):
+    point: str
+    pending: frozenset[str]
+    signal: Signal | None
 
 
 class Interpreter:
@@ -108,8 +124,14 @@ class Interpreter:
             signal.source if signal.target == "self" else _get_target_ref(signal.target)
         )
 
-    def _execute(self, run: FlowRun) -> Any:
+    def _execute(self, run: FlowRun, replay: InputState | None = None) -> Any:
         try:
+            if replay is not None:
+                frame = self.frames[-1]
+                assert frame.branch is not None
+                self._action(
+                    frame, frame.branch.instructions[frame.position - 1], replay.signal
+                )
             result = None
             while self.drives:
                 drive = self.drives[-1]
@@ -291,34 +313,14 @@ class Interpreter:
                 if instruction.site is None:
                     self._statement(frame, node)
                 else:
-                    run = require_run(frame.signal.env)
-                    point = run.begin(
-                        frame.specification,
-                        frame.method.name,
-                        frame.branch_index,
-                        instruction.site,
-                        "break" if instruction.operation == "break" else "bare",
-                        {
-                            "source": frame.system,
-                            "bindings": {
-                                name: value
-                                for name, value in frame.locals.items()
-                                if name not in {"self", "env"}
-                            },
-                        },
-                    )
-                    if instruction.operation == "break":
-                        self._break(run, frame, point, node.value.args[0])
-                    self._statement(frame, node)
-                    run.complete(point)
+                    self._action(frame, instruction, None)
             case "drive" | "emit":
                 call = node.value
                 assert isinstance(call, ast.Call)
+                operation = instruction.operation
                 args = [self._eval(frame, arg) for arg in call.args]
                 if len(args) != 2:
-                    raise SpecError(
-                        f"{instruction.operation} expects target and action"
-                    )
+                    raise SpecError(f"{operation} expects target and action")
                 kwargs = {}
                 for keyword in call.keywords:
                     value = self._eval(frame, keyword.value)
@@ -329,46 +331,79 @@ class Interpreter:
                 target, action = args
                 if not isinstance(target, str) or not isinstance(action, str):
                     raise SpecError("Signal target and action must be strings")
-                queue = (
-                    frame.signal.queue if instruction.operation == "emit" else deque()
-                )
+                queue = frame.signal.queue if operation == "emit" else deque()
                 signal = Signal(
-                    frame.system,
-                    target,
-                    action,
-                    kwargs,
-                    frame.signal.env,
-                    queue,
+                    frame.system, target, action, kwargs, frame.signal.env, queue
                 )
-                assert instruction.site is not None
-                run = require_run(signal.env)
-                point = run.begin(
-                    frame.specification,
-                    frame.method.name,
-                    frame.branch_index,
-                    instruction.site,
-                    instruction.operation,
-                    {
-                        "source": signal.source,
-                        "target": target,
-                        "action": action,
-                        "args": kwargs,
-                    },
-                )
-                queue.append(signal)
-                if instruction.operation == "emit":
-                    run.complete(point)
-                else:
-                    env = signal.env
-                    depth = env.depth
-                    print(
-                        f"{'    ' * depth}{frame.system}:\n{'    ' * (depth + 1)}{action} -> {target}"
-                    )
-                    env.depth += 1
-                    env.signal_queues.append(queue)
-                    self.drives.append(Drive(queue, point))
+                self._action(frame, instruction, signal)
             case _:
                 raise SpecError(f"unknown instruction {instruction.operation}")
+
+    def _action(self, frame: Frame, instruction, signal: Signal | None) -> None:
+        assert instruction.site is not None
+        operation = instruction.operation
+        env = frame.signal.env
+        run = require_run(env)
+        values = (
+            {
+                "source": signal.source,
+                "target": signal.target,
+                "action": signal.action,
+                "args": signal.args,
+            }
+            if signal is not None
+            else {
+                "source": frame.system,
+                "bindings": {
+                    name: value
+                    for name, value in frame.locals.items()
+                    if name not in {"self", "env"}
+                },
+            }
+        )
+        point = run.begin(
+            frame.specification,
+            frame.method.name,
+            frame.branch_index,
+            instruction.site,
+            "bare" if operation == "statement" else operation,
+            values,
+        )
+        if (capture := run.capture_input) is not None:
+            if not self.can_pause:
+                raise SpecError("capturing an I point requires a resumable spec stack")
+            run.capture_input = None
+            saved = InputState(
+                self.owner,
+                env,
+                self._frame_states(),
+                self.drives,
+                self._spec_fingerprints(),
+                point,
+                run.pending_before(point),
+                signal,
+            )
+            capture(point, freeze_input(run.root, env, saved))
+
+        if signal is None:
+            node = instruction.node
+            if operation == "break":
+                self._break(run, frame, point, node.value.args[0])
+            self._statement(frame, node)
+            run.complete(point)
+        else:
+            signal.queue.append(signal)
+            if operation == "emit":
+                run.complete(point)
+            else:
+                depth = env.depth
+                print(
+                    f"{'    ' * depth}{frame.system}:\n"
+                    f"{'    ' * (depth + 1)}{signal.action} -> {signal.target}"
+                )
+                env.depth += 1
+                env.signal_queues.append(signal.queue)
+                self.drives.append(Drive(signal.queue, point))
 
     def _close(self, frame: Frame, error: BaseException | None = None):
         try:
@@ -423,6 +458,20 @@ class Interpreter:
             for spec in frame.system.__spec_registry__.specifications.values()
         }
 
+    def _frame_states(self) -> list[FrameState]:
+        return [
+            FrameState(
+                frame.signal,
+                frame.system,
+                frame.locals,
+                frame.specification.name,
+                frame.branch_index,
+                frame.position,
+                frame.guards,
+            )
+            for frame in self.frames
+        ]
+
     def _break(
         self, run: FlowRun, frame: Frame, point: str, expression: ast.expr
     ) -> None:
@@ -445,18 +494,7 @@ class Interpreter:
         continuation = Continuation(
             owner=owner,
             env=run.env,
-            frames=[
-                FrameState(
-                    active.signal,
-                    active.system,
-                    active.locals,
-                    active.specification.name,
-                    active.branch_index,
-                    active.position,
-                    active.guards,
-                )
-                for active in self.frames
-            ],
+            frames=self._frame_states(),
             drives=self.drives,
             specs=self._spec_fingerprints(),
             history=run.position_after_pause(point),
@@ -464,7 +502,7 @@ class Interpreter:
         path = run.complete(point, continuation=continuation)
         raise FlowPaused(point, state, path)
 
-    def _restore(self, saved: Continuation) -> None:
+    def _restore(self, saved: Continuation | InputState) -> None:
         env = saved.env
         if (
             not saved.frames
@@ -473,7 +511,10 @@ class Interpreter:
             or env.depth < len(saved.drives)
         ):
             raise SnapshotCompatibilityError("invalid continuation stack")
-        if saved.drives[0].caller_point is not None or saved.history.pending != {
+        pending = (
+            saved.history.pending if isinstance(saved, Continuation) else saved.pending
+        )
+        if saved.drives[0].caller_point is not None or pending != {
             drive.caller_point for drive in saved.drives[1:]
         }:
             raise SnapshotCompatibilityError("invalid pending drives in continuation")
@@ -509,13 +550,21 @@ class Interpreter:
             ):
                 raise SnapshotCompatibilityError("invalid continuation contract branch")
             branch = method.branches[item.branch_index]
-            operation = (
-                "break" if len(self.frames) == len(saved.frames) - 1 else "drive"
-            )
-            if (
-                not 1 <= item.position <= len(branch.instructions)
-                or branch.instructions[item.position - 1].operation != operation
-            ):
+            if not 1 <= item.position <= len(branch.instructions):
+                raise SnapshotCompatibilityError(
+                    "invalid continuation instruction position"
+                )
+            instruction = branch.instructions[item.position - 1]
+            if len(self.frames) < len(saved.frames) - 1:
+                valid = instruction.operation == "drive"
+            elif isinstance(saved, Continuation):
+                valid = instruction.operation == "break"
+            else:
+                valid = instruction.site is not None and (
+                    (instruction.operation in {"drive", "emit"})
+                    == (saved.signal is not None)
+                )
+            if not valid:
                 raise SnapshotCompatibilityError(
                     "invalid continuation instruction position"
                 )
@@ -533,13 +582,19 @@ class Interpreter:
                 )
             )
 
-        cpu_flow = self.owner.__spec_registry__.types.get("CpuFlow")
-        if (
-            cpu_flow is None
-            or not isinstance(self.owner, cpu_flow)
-            or not any(frame.system is self.owner for frame in self.frames)
-        ):
+        owner = self.owner
+        if owner is None and isinstance(saved, Continuation):
             raise SnapshotCompatibilityError("continuation lacks its CpuFlow contract")
+        if owner is not None:
+            cpu_flow = owner.__spec_registry__.types.get("CpuFlow")
+            if (
+                cpu_flow is None
+                or not isinstance(owner, cpu_flow)
+                or not any(frame.system is owner for frame in self.frames)
+            ):
+                raise SnapshotCompatibilityError(
+                    "continuation lacks its CpuFlow contract"
+                )
         if self._spec_fingerprints() != saved.specs:
             raise SnapshotCompatibilityError(
                 "continuation spec fingerprints do not match"
@@ -566,7 +621,31 @@ class Interpreter:
         return result
 
 
-def resume_checkpoint(root: object, path: Path, model_version: int) -> Any:
+def _continue(
+    run: FlowRun, state: dict[str, Any], saved: Continuation | InputState
+) -> Any:
+    interpreter = Interpreter()
+    interpreter._restore(saved)
+    env = saved.env
+    root_depth = env.depth - len(env.signal_queues)
+    with run:
+        run.root.__dict__ = state
+        try:
+            return interpreter._execute(
+                run, saved if isinstance(saved, InputState) else None
+            )
+        finally:
+            env.signal_queues.clear()
+            env.depth = root_depth
+
+
+def resume_checkpoint(
+    root: object,
+    path: Path,
+    model_version: int,
+    *,
+    capture_input: CaptureInput | None = None,
+) -> Any:
     """Continue from the instruction after the latest saved break."""
     Interpreter._check_root(root)
     metadata, state, saved = read_snapshot(
@@ -575,14 +654,28 @@ def resume_checkpoint(root: object, path: Path, model_version: int) -> Any:
     point = metadata.get("input_point")
     if not isinstance(saved, Continuation) or point is None:
         raise SnapshotCompatibilityError(f"{path} is not a break checkpoint")
-    interpreter = Interpreter()
-    interpreter._restore(saved)
-    env = saved.env
-    root_depth = env.depth - len(env.signal_queues)
-    with FlowRun(root, env, model_version, history=(path, saved.history, point)) as run:
-        root.__dict__ = state
-        try:
-            return interpreter._execute(run)
-        finally:
-            env.signal_queues.clear()
-            env.depth = root_depth
+    run = FlowRun(
+        root,
+        saved.env,
+        model_version,
+        history=(path, saved.history, point),
+        capture_input=capture_input,
+    )
+    return _continue(run, state, saved)
+
+
+def fork_input(
+    root: object, base: str, frozen: bytes, candidate: Path, model_version: int
+) -> Any:
+    """Run a new branch from an I point using a candidate O point's GV."""
+    Interpreter._check_root(root)
+    _, state, _ = read_snapshot(
+        root, candidate, model_version=model_version, expected_checkpoint=candidate.stem
+    )
+    saved = bind_input(root, state, frozen)
+    if not isinstance(saved, InputState) or saved.point != base:
+        raise SnapshotCompatibilityError("captured I point does not match its base")
+    run = FlowRun(
+        root, saved.env, model_version, fork=Fork(base, candidate, saved.pending)
+    )
+    return _continue(run, state, saved)

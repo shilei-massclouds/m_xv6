@@ -8,13 +8,12 @@ BP、AP 和 InitProc Flow 均由 spec 描述并解释执行，入口分别为 `f
 python3 main.py
 ```
 
-执行 `make` 或 `make run` 会先清理生成数据，再在同一进程中依次独立运行 BP、AP。每个 Flow 启动前重置 GV、创建默认 Env 和独立的 `FlowRun` 上下文。独立运行的 AP 会在等待启动通知时暂停为 `BUSYCHECK`，并打印可恢复的 O 点文件。
+执行 `make` 或 `make run` 会先清理生成数据，再按以下顺序推导。
 
-```sh
-python3 main.py --resume snapshots/ap/outputs/ap_0.1.snap
-```
-
-恢复使用所选 O 点内的 GV 和执行状态，从 `break` 后一条指令继续，在同一分支追加 I/O 记录。每次使用最新且之后未追加 I/O 的断点。默认 AP 检查点里的通知仍为假，恢复会重新产生一个 `BUSYCHECK` 断点。再次执行 `make run` 会重建历史。
+1. BP 从默认 GV、Env 开始，生成候选 O 快照。
+2. AP 从默认 GV、Env 开始，在首个 I 点 `ap_0.0` 暂存执行状态，并在等待通知时暂停为 `BUSYCHECK`。
+3. AP 从该 `break` O 点恢复，在 `emit("self", "_wait")` 的 I 点 `ap_0.3` 暂存第二份执行状态。默认 GV 中的通知仍为假，AP 再次暂停。
+4. 对两个基准 I 点分别加载每份 BP 候选 GV，保留 AP 的 Env、Signal 和执行位置，逐一推导派生分支。当前 64 份候选在每个起点各产生 51 个 `BUSYCHECK`、6 个 `SWITCHED`、7 个 `WFI`。
 
 I/O 点只由 spec 的 Actions 操作行触发。裸操作执行前记录 I 点，成功后保存 O 点。`drive` 和 `emit` 在 Signal 参数求值完成后记录 I 点，分别在队列处理完毕并交付结果、以及 Signal 入队后生成 O 点。`break` 通过所属 CpuFlow 实例最内层活动契约的 Ensures 后，保存可恢复的 O 点。内部 Actions 操作各自设点。
 
@@ -22,9 +21,9 @@ I/O 点只由 spec 的 Actions 操作行触发。裸操作执行前记录 I 点�
 
 `TaskLocalEnv` 必须提供当前 Flow 的 `name`，只保存 CV、调用深度和 Signal 队列。`FlowRun(gv, env, model_version)` 独立维护当前分支、I/O 计数器、I 点记录及最近的输出；不再有 Env 候选列表、`handled` 或 `range`。执行 spec 必须处于对应 Env 的活动 `FlowRun` 中；一个上下文可执行多个根 Signal，但不能嵌套或复用。
 
-每个 Flow 在 `snapshots/<flow>/inputs/records.json` 中保存 I 点记录，在 `snapshots/<flow>/outputs/` 中保存 GV 快照。I 点从 `<flow>_0.0` 按进入顺序编号；初始 O 点 `<flow>_0.0.snap` 保存运行开始时的 GV，之后按操作完成顺序从 1 编号。I/O 独立计数，不用同名推断对应关系；O 文件头的可选字段 `input_point` 指向来源 I 点，初始 O 没有这个字段。当前仅运行分支 0。路径固定相对于仓库根目录，与工作目录无关。
+每个 Flow 在 `snapshots/<flow>/inputs/records.json` 中保存 I 点记录，在 `snapshots/<flow>/outputs/` 中保存快照。I/O 点分别以 `<flow>_<分支号>.<序号>` 独立编号。分支 0 的初始 O 保存默认 GV，其余分支以候选 O 为初始输入，首个完成操作的 O 从 0 编号。O 文件头的可选字段 `input_point` 指向来源 I。路径固定相对于仓库根目录。
 
-记录文件包含格式/模型版本、涉及 spec 的指纹，以及各 I 点的名称、`base=null`、输入快照路径、源位置和动作输入。Env、Frame 和队列写入 `break` 的 O 点文件，与 GV 共享对象引用。I 点记录的用途是描述操作输入。详见 [framework/SPEC.md](framework/SPEC.md)。
+派生分支首个 I 的 `base` 是基准 I 点名，`input_snapshot` 是 BP 候选快照路径。其他 I 点的 `base` 为 `null`。基准 I 点的运行状态暂存在本次推导的内存中，`break` O 点继续持久化 Env、Frame 和 Signal 队列。详见 [framework/SPEC.md](framework/SPEC.md)。
 
 操作失败、契约失败或 StepPoint 不生成对应 O 点；已经成功的内部操作输出保留。I 写入失败时不执行操作；O 保存失败时不消耗 O 序号、不覆盖已有文件、不回滚 GV。异常后停止该上下文的后续执行，保护域和 Frame 正常清理。现有同 Flow 的记录和输出不会被覆盖，再次首轮运行前需执行 `make clean_snap`；该命令递归清理生成记录、快照和临时文件，保留说明文件。
 

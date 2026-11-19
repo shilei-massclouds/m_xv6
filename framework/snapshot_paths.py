@@ -23,3 +23,11 @@ def snapshot_path(flow: str, position: int, branch: int = 0) -> Path:
     if type(branch) is not int or branch < 0:
         raise ValueError("snapshot branch must be a nonnegative integer")
     return directory / "outputs" / f"{flow}_{branch}.{position}.snap"
+
+
+def branch_outputs(flow: str, branch: int) -> list[Path]:
+    directory = flow_directory(flow) / "outputs"
+    return sorted(
+        directory.glob(f"{flow}_{branch}.*.snap"),
+        key=lambda path: int(path.stem.rsplit(".", 1)[1]),
+    )

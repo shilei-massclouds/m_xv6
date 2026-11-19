@@ -15,7 +15,7 @@ with FlowRun(gv, env, MODEL_VERSION):
 assert result is None
 ```
 
-`make run` 清理生成数据后分别从默认 GV、Env 独立运行 BP 和 AP。AP 首轮在 `BUSYCHECK` 保存可恢复的 O 点。InitProc 暂不接入 `main.py`；手动调用也需显式使用 `FlowRun`，该上下文本身复用传入 GV。注册入口的路径相对于仓库根目录解析。GV 模型均通过 `flows.model_specs.new_model(...)` 创建，需要类型或枚举时使用 `registry.model("CpuFlow")`、`registry.namespace["CpuFlowState"]` 等注册项。
+`make run` 清理生成数据后分别从默认 GV、Env 独立运行 BP 和 AP。AP 首轮在 `BUSYCHECK` 保存可恢复的 O 点，随后从这个点续跑一次。两次 AP 推导各暂存首个 I 点，用 BP 的每份 O 快照为这两个 I 点分别生成派生分支。InitProc 暂不接入 `main.py`；手动调用也需显式使用 `FlowRun`，该上下文本身复用传入 GV。注册入口的路径相对于仓库根目录解析。GV 模型均通过 `flows.model_specs.new_model(...)` 创建，需要类型或枚举时使用 `registry.model("CpuFlow")`、`registry.namespace["CpuFlowState"]` 等注册项。
 
 BP 和 AP 继承同一份 `CpuFlow.spec`，调度器通过 `next_runnable = drive("proc_table", "pick_runnable")` 接收 spec 返回值，不再使用 Holder 输出参数。InitProc 的首次执行检查也直接接收 `FirstProc.spec` 的布尔返回值；首次进入时调用文件系统初始化和进程 `_kexec`，最后切换到用户态。
 
@@ -45,12 +45,14 @@ Signal 调用写成 `drive("target", "action", key=value)`，可直接调用或�
 
 设点严格针对 spec 的 Actions 源操作行，裸操作一行是一个原子操作。解析器为这些行附加源位置；方法入口/出口、Requires/Ensures、保护域进入/退出、解释器内部指令、`assert` 和 `pass` 不触发设点。Actions 中显式执行的同步原语调用属于裸操作，仍然设点。Python Origin 发出的根 Signal 不来自 Actions，不单独设点；根方法内部的 Actions 正常设点。
 
-每个 `FlowRun` 先保存初始 O 点 `<flow>_0.0.snap`，I 从 `<flow>_0.0` 开始，后续 O 从 1 开始。`inputs/records.json` 的 `points` 保存名称、`base=null`、最近输出的相对路径、spec 文件/方法/契约分支/行号、操作种类和原文、输入描述。`spec_fingerprints` 保存涉及文件在解析时的 SHA-256。O 的可选文件头字段 `input_point` 记录来源 I；初始 O 不含该字段。
+初次 `FlowRun` 保存默认 GV 的初始 O 点 `<flow>_0.0.snap`，后续 O 从 1 开始。每个派生分支以候选快照为初始输入，I 和实际生成的 O 分别从 0 编号。`inputs/records.json` 的 `points` 保存名称、`base`、输入快照的相对路径、源位置、操作种类和原文、输入描述。派生分支首个 I 的 `base` 指向基准 I，其余 I 的 `base` 为 `null`。`spec_fingerprints` 保存涉及文件在解析时的 SHA-256。O 文件头的 `input_point` 记录来源 I，恢复分支中跨 I 点挂起的 `drive` 完成后仍指向原来的 I。
 
 drive 输入描述来源模型、目标、方法和实参；裸操作描述来源模型及当前局部绑定（排除 `self`、`env`）。编码中的 `gv` 路径相对于该 I 绑定的输入快照，支持属性、序列下标、字典键/值位置和绑定方法的所属对象；其他模型实例、容器和绑定方法使用 `objects` 表与 `local` 编号，保留别名和循环。枚举和方法记录可导入类型/函数名称。Env/CV 仅能作为 `environment` 引用，不展开状态；队列及不支持的值明确报错，GV 中含对象成员的集合也会拒绝。路径和 local 编号不代表跨 GV 快照的稳定身份。
 
 I 记录原子写入后才执行操作，O 原子保存后才推进输出计数。持久化失败停止本次推导，不覆盖已完成文件。已有同 Flow 数据时拒绝再次首轮运行，需先清理；输入记录不含完整 Env、Frame 或可恢复执行栈。
 
-格式 2 的 `break` O 点在同一个对象图中保存 GV、Env、保护域、Frame、Signal 队列和 I/O 位置。格式 1 为普通 GV 快照。用 `python3 main.py --resume <断点文件>` 从当前原样保留的最新断点续写；加载会检查模型版本、spec 指纹及 I/O 历史。普通 GV 加载器可以读取两种格式。本轮续跑范围限于原分支和断点自带的 GV。
+格式 2 的 `break` O 点在同一个对象图中保存 GV、Env、保护域、Frame、Signal 队列和 I/O 位置。格式 1 为普通 GV 快照。框架内部的 `resume_checkpoint` 仍从原分支最新断点续写。加载会检查模型版本、spec 指纹和该分支的 I/O 历史。普通 GV 加载器可以读取两种格式。
+
+`FlowRun` 和 `resume_checkpoint` 的 `capture_input` 回调可以暂存首个 I 点。若该 I 已形成 Signal，暂存包括已求值的实参。`fork_input` 为每份候选 GV 独立恢复 AP 的 Env、Frame、Signal 和保护域，并按 GV 属性路径重新绑定引用。当前候选替换支持有属性路径的对象，按列表或字典位置访问的成员仅用于 I 点记录。候选缺少对应成员或类型不匹配时报告错误。基准 I 点状态在当前进程内复用。
 
 验证：`python3 -m pytest -q tests/test_spec.py`；完整检查：`make test`。测试仅保障 framework，`ProcTable.spec` 作为首个语言验证输入。

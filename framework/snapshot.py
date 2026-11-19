@@ -9,10 +9,13 @@ import os
 import pickle
 import tempfile
 from datetime import UTC, datetime
-from io import BufferedRandom
+from io import BufferedRandom, BytesIO
 from pathlib import Path
 from types import MethodType
 from typing import Any, BinaryIO, NotRequired, TypedDict, cast
+
+from framework.engine import TaskLocalEnv
+from framework.input_encoding import InputEncoder
 
 MAGIC = b"M_XV6_SNAPSHOT\n"
 FORMAT_VERSION = 1
@@ -72,6 +75,72 @@ class _SnapshotUnpickler(pickle.Unpickler):
         if isinstance(pid, str) and pid == _ROOT_ID:
             return self.root
         raise pickle.UnpicklingError(f"unknown persistent reference: {pid!r}")
+
+
+class _InputPickler(_SnapshotPickler):
+    def __init__(self, stream: BinaryIO, root: object, env: TaskLocalEnv):
+        super().__init__(stream, root)
+        self.references = InputEncoder(root, env)
+
+    def persistent_id(self, obj: object) -> Any:
+        if obj is vars(self.root):
+            return "gv_attributes"
+        if obj is self.root:
+            return _ROOT_ID
+        path = self.references.gv_path(obj)
+        if path is None:
+            return None
+        if any("attribute" not in step for step in path):
+            raise SnapshotCompatibilityError(
+                f"cannot bind an I point's GV reference by container position: {path}"
+            )
+        return (
+            "gv_member",
+            tuple(step["attribute"] for step in path),
+            type(obj).__module__,
+            type(obj).__qualname__,
+        )
+
+
+class _InputUnpickler(_SnapshotUnpickler):
+    def __init__(self, stream: BinaryIO, root: object, candidate: dict[str, Any]):
+        super().__init__(stream, root)
+        self.candidate = candidate
+
+    def persistent_load(self, pid: object) -> object:
+        if pid == "gv_attributes":
+            return self.candidate
+        if isinstance(pid, tuple) and pid[0] == "gv_member":
+            _, names, module, name = pid
+            try:
+                value = self.candidate[names[0]]
+                for attribute in names[1:]:
+                    value = vars(value)[attribute]
+            except (KeyError, TypeError) as error:
+                raise SnapshotCompatibilityError(
+                    f"candidate lacks GV member {'.'.join(names)}"
+                ) from error
+            if (type(value).__module__, type(value).__qualname__) != (module, name):
+                raise SnapshotCompatibilityError(
+                    f"candidate has an incompatible type for GV member {'.'.join(names)}"
+                )
+            return value
+        return super().persistent_load(pid)
+
+
+def freeze_input(root: object, env: TaskLocalEnv, execution: object) -> bytes:
+    """Copy an I point's execution state with references to GV attributes."""
+    stream = BytesIO()
+    try:
+        _InputPickler(stream, root, env).dump(execution)
+    except (pickle.PickleError, AttributeError, TypeError) as error:
+        raise SnapshotError(f"cannot capture I point: {error}") from error
+    return stream.getvalue()
+
+
+def bind_input(root: object, candidate: dict[str, Any], frozen: bytes) -> object:
+    """Restore a fresh execution graph bound to the candidate's GV members."""
+    return _InputUnpickler(BytesIO(frozen), root, candidate).load()
 
 
 def _encode_header(metadata: SnapshotMetadata) -> bytes:
