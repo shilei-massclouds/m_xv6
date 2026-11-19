@@ -21,6 +21,7 @@ _MODEL_PATHS = (
     "kernel/CurrentHart.spec",
     "kernel/Trap.spec",
     "kernel/IO.spec",
+    "framework/BusyWait.spec",
     "kernel/SmpStarted.spec",
     "kernel/FirstProc.spec",
     "drivers/Console.spec",

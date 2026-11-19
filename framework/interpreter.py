@@ -7,14 +7,22 @@ import hashlib
 import operator
 from collections import deque
 from contextlib import ExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from framework.contracts import ContractViolation, Phase
 from framework.engine import FlowPaused, Signal, TaskLocalEnv, _get_target_ref
-from framework.flow_run import CaptureInput, FlowRun, Fork, RunPosition, require_run
+from framework.flow_run import (
+    CapturedInput,
+    CaptureInput,
+    CaptureOutput,
+    FlowRun,
+    Fork,
+    RunPosition,
+    require_run,
+)
 from framework.snapshot import (
     SnapshotCompatibilityError,
     bind_input,
@@ -411,7 +419,23 @@ class Interpreter:
                 signal,
                 restart=restart,
             )
-            capture(point, freeze_input(run.root, run.env, saved))
+            frozen = freeze_input(run.root, run.env, saved)
+            # History labels must not distinguish otherwise identical restart
+            # states. Keep each drive's role in the saved call stack.
+            control = replace(
+                saved,
+                point="",
+                pending=frozenset(),
+                drives=[
+                    replace(drive, caller_point="" if drive.caller_point else None)
+                    for drive in saved.drives
+                ],
+            )
+            key = hashlib.sha256(freeze_input(run.root, run.env, control)).digest()
+            capture(
+                point,
+                CapturedInput(frozen, run.latest_output, run.env.notified, key),
+            )
 
     def _action(
         self, frame: Frame, instruction: Instruction, signal: Signal | None
@@ -790,6 +814,7 @@ def resume_checkpoint(
     model_version: int,
     *,
     capture_input: CaptureInput | None = None,
+    capture_output: CaptureOutput | None = None,
     capture_all_inputs: bool = False,
 ) -> Any:
     """Continue from the latest saved break's instruction or restart entry."""
@@ -806,6 +831,7 @@ def resume_checkpoint(
         model_version,
         history=(path, saved.history, point),
         capture_input=capture_input,
+        capture_output=capture_output,
         capture_all_inputs=capture_all_inputs,
     )
     return _continue(run, state, saved)
@@ -814,27 +840,31 @@ def resume_checkpoint(
 def fork_input(
     root: object,
     base: str,
-    frozen: bytes,
+    captured: CapturedInput,
     candidate: Path,
     model_version: int,
     *,
     capture_input: CaptureInput | None = None,
+    capture_output: CaptureOutput | None = None,
     capture_all_inputs: bool = False,
 ) -> Any:
     """Run a new branch from an I point using a candidate O point's GV."""
     Interpreter._check_root(root)
-    _, state, _ = read_snapshot(
+    metadata, state, _ = read_snapshot(
         root, candidate, model_version=model_version, expected_checkpoint=candidate.stem
     )
-    saved = bind_input(root, state, frozen)
+    saved = bind_input(root, state, captured.frozen)
     if not isinstance(saved, InputState) or saved.point != base:
         raise SnapshotCompatibilityError("captured I point does not match its base")
+    saved.env.notified |= frozenset(metadata.get("notified", []))
+    saved.env.waited |= frozenset(metadata.get("waits_for", []))
     run = FlowRun(
         root,
         saved.env,
         model_version,
         fork=Fork(base, candidate, saved.pending),
         capture_input=capture_input,
+        capture_output=capture_output,
         capture_all_inputs=capture_all_inputs,
     )
     return _continue(run, state, saved)

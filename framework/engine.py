@@ -35,6 +35,18 @@ class TaskLocalEnv:
     cv: ContentionVector = field(default_factory=ContentionVector.zeros)
     depth: int = 0
     signal_queues: list[deque[Signal]] = field(default_factory=list, repr=False)
+    notified: frozenset[str] = frozenset()
+    waited: frozenset[str] = frozenset()
+
+    def notify_busy_wait(self, instance: System) -> None:
+        from framework.flow_run import busy_wait_name
+
+        self.notified |= {busy_wait_name(self, instance)}
+
+    def observe_busy_wait(self, instance: System) -> None:
+        from framework.flow_run import busy_wait_name
+
+        self.waited |= {busy_wait_name(self, instance)}
 
 
 def _get_target_ref(path: str) -> System:

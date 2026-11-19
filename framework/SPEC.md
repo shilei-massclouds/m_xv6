@@ -1,6 +1,6 @@
 # Spec 解释执行
 
-第一份输入是移入 `kernel/ProcTable.spec` 的 `_pick_runnable` 定义。BP、AP 和 InitProc 均已迁移为 spec 解释执行，入口为 `flows/BpInitFlow.spec`、`flows/ApInitFlow.spec` 和 `flows/InitProcFlow.spec`。`flows/model_specs.py` 统一注册 26 个对象定义，包括它们实际依赖的内核、驱动、文件系统和结构对象。
+第一份输入是移入 `kernel/ProcTable.spec` 的 `_pick_runnable` 定义。BP、AP 和 InitProc 均已迁移为 spec 解释执行，入口为 `flows/BpInitFlow.spec`、`flows/ApInitFlow.spec` 和 `flows/InitProcFlow.spec`。`flows/model_specs.py` 统一注册对象定义，包括它们实际依赖的内核、驱动、文件系统和结构对象。
 
 ```python
 from framework.engine import System, TaskLocalEnv
@@ -43,7 +43,9 @@ Signal 调用写成 `drive("target", "action", key=value)`，可直接调用或�
 
 带恢复入口的 `break` 选中栈上最近的匹配调用；`"self"` 指执行 `break` 的对象。解释器退出该调用及其后代的保护域，不把这些栈帧当作正常返回。断点 O 保存被选中调用的原始 Signal、待交付结果的调用位置，以及剩余栈和 Env。续跑用原实参重新进入该方法，重新检查 CV 和 Requires；已完成的 GV 变化不回滚。被放弃的内部 `drive` 或 `with` 保留 I 记录，没有对应的完成 O；原调用直到正常返回才完成。
 
-AP 的 `_wait` 用 `break(CpuFlowState.BUSYCHECK, "self", "wait")` 退出 `wait` 的保护域。用其他 GV 分叉时，`break` 的 I 记录关联的是退出保护后的恢复入口。候选 GV 可在这里改变 `SmpStarted.signaled`；AP 的 `BUSYCHECK` 和待完成的 `wait` 调用会保留。续跑重新进入 `wait`，按当前通知值继续或再次暂停。
+AP 的 `_wait` 用 `break(CpuFlowState.BUSYCHECK, "self", "wait")` 退出 `wait` 的保护域。用其他 GV 分叉时，`break` 的 I 记录关联的是退出保护后的恢复入口。候选 GV 可在这里提供 `SmpStarted.signaled`；AP 的 `BUSYCHECK` 和待完成的 `wait` 调用会保留。续跑重新进入 `wait`，按当前通知值继续或再次暂停。
+
+`SmpStarted` 继承一次性通知原语 `BusyWait`。实例以其 GV 属性路径（如 `smp_started`）标识。成功执行 `notify` 后记录通知；通过 `wait` 时记录对此通知的依赖，暂停等待时不记录依赖。这些事实随 Env 传递，不额外产生 I/O 点。
 
 生成的类型和回调函数注册在指定 Python 模块中，因此对象图可以沿用现有 Pickle 快照。统一导出模块为 `flows.model_specs`，新进程导入 `global_vars` 时会自动注册。模型版本保持为 9；删除未使用的 Python 模型及导出壳不改变类型路径，现有版本 9 的快照继续兼容，其他模型版本需重新生成。另一个进程加载这些对象前，必须先注册相同的 spec；spec 内容和类型定义需要兼容。
 
@@ -59,6 +61,6 @@ drive 输入描述来源模型、目标、方法和实参；裸操作描述来�
 
 `FlowRun`、`resume_checkpoint` 和 `fork_input` 的 `capture_input` 回调默认暂存首个 I 点，设 `capture_all_inputs=True` 后暂存每个 I 点。若该 I 已形成 Signal，暂存包括已求值的实参。`fork_input` 为每份候选 GV 独立恢复目标线路的 Env、Frame、Signal 和保护域，并按 GV 属性路径重新绑定引用。只通过容器位置找到的对象随执行状态冻结，以免加载另一份 GV 时把已求值的参数换成同一下标的其他对象。候选缺少需重新绑定的成员或类型不匹配时报告错误。基准 I 点状态在当前进程内复用。
 
-`derive_flows` 接收一组 Origin，按阶展开有方向的组合。每条线路从 `start()` 或分叉 I 点出发；遇到 `break` 时续跑，每条线路在同一源代码位置最多续跑一次。派生分支会应用尚未参与该线路的 Flow 的一阶 O 快照，并保留自己新产生的 I 点供下一阶使用。运行错误直接向外传播，已产生的记录由批次上下文保存。
+`derive_flows` 接收一组 Origin，按阶展开有方向的组合。每条线路从 `start()` 或分叉 I 点出发；遇到 `break` 时续跑，每条线路在同一源代码位置最多续跑一次。初始 O 不作为候选；一阶和派生线路实际产生的 O 都可供后续组合。候选的 `waits_for` 必须是目标 I 点 `notified` 的子集。候选若已包含目标 Flow 的推进，只能接回它所记录的继续位置；含有已发通知的前缀也要用继承该通知的候选接续。分支去重同时考虑候选 GV、通知事实和各 Flow 的继续状态。运行错误直接向外传播，已产生的记录由批次上下文保存。
 
 验证：`python3 -m pytest -q tests/test_spec.py`；完整检查：`make test`。测试仅保障 framework，`ProcTable.spec` 作为首个语言验证输入。

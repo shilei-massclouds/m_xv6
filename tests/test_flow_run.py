@@ -15,7 +15,7 @@ from framework import flow_run, snapshot_paths
 from framework.contracts import ContractViolation
 from framework.derivation import derive_flows
 from framework.engine import FlowPaused, StepPoint, System, TaskLocalEnv
-from framework.flow_run import FlowRun, buffer_input_records, require_run
+from framework.flow_run import CapturedInput, FlowRun, buffer_input_records, require_run
 from framework.input_encoding import InputEncodingError
 from framework.interpreter import Continuation, fork_input, resume_checkpoint
 from framework.snapshot import (
@@ -57,12 +57,23 @@ class DerivationOrigin(System):
 
 
 @dataclass
+class ActionOrigin(System):
+    env: TaskLocalEnv
+    target: str
+    action: str
+
+    def start(self) -> None:
+        self.drive(self.env, self.target, self.action)
+
+
+@dataclass
 class Root:
     worker: Any = None
     native: NativeTarget = field(default_factory=NativeTarget)
     bad: Any = None
     other: Any = None
     smp_started: Any = None
+    other_wait: Any = None
 
 
 @pytest.fixture
@@ -94,8 +105,10 @@ Prop history: list[int]
 """
         + textwrap.dedent(actions)
     )
-    wait = Path(__file__).resolve().parents[1] / "kernel" / "SmpStarted.spec"
-    registry = SpecRegistry([path, wait])
+    repo = Path(__file__).resolve().parents[1]
+    registry = SpecRegistry(
+        [path, repo / "framework/BusyWait.spec", repo / "kernel/SmpStarted.spec"]
+    )
     root.worker = registry.model("CpuFlow")()
     root.other = registry.model("CpuFlow")()
     root.smp_started = registry.model("SmpStarted")()
@@ -157,7 +170,7 @@ def test_action_points_follow_the_declaring_method_and_drive_completion_order(
     """,
     )
     env = TaskLocalEnv(name="example")
-    captured: dict[str, bytes] = {}
+    captured: dict[str, CapturedInput] = {}
     with FlowRun(
         root, env, 1, capture_input=captured.__setitem__, capture_all_inputs=True
     ) as run:
@@ -734,7 +747,7 @@ def test_labeled_break_fork_reuses_original_arguments_and_return_position(
     root.worker.result = 7
     root.smp_started.signaled = False
 
-    anchors: dict[str, bytes] = {}
+    anchors: dict[str, CapturedInput] = {}
     with (
         pytest.raises(FlowPaused) as pause,
         FlowRun(
@@ -873,7 +886,7 @@ def test_fork_both_entry_points_with_independent_candidate_gvs(
         return replace(source, destination)
 
     monkeypatch.setattr(flow_run.os, "replace", track_record_publish)
-    anchors: dict[str, bytes] = {}
+    anchors: dict[str, CapturedInput] = {}
     with (
         buffer_input_records() if buffered else nullcontext(),
         deduplicate_outputs(pack_breaks=True) if buffered else nullcontext(),
@@ -951,7 +964,7 @@ def test_fork_reuses_prepared_signal_and_selected_contract(root, tmp_path):
     save_snapshot(root, candidate, checkpoint=candidate.stem, model_version=1)
     root.worker.value = 1
 
-    anchors: dict[str, bytes] = {}
+    anchors: dict[str, CapturedInput] = {}
     with FlowRun(
         root, TaskLocalEnv(name="example"), 1, capture_input=anchors.__setitem__
     ) as run:
@@ -997,7 +1010,7 @@ def test_guarded_drive_forks_before_guards_and_saves_after_exit(
     save_snapshot(root, candidate, checkpoint=candidate.stem, model_version=1)
     root.worker.value = 3
     env = TaskLocalEnv("example")
-    anchors: dict[str, bytes] = {}
+    anchors: dict[str, CapturedInput] = {}
     events: list[str] = []
     original_save = flow_run.save_output_snapshot
 
@@ -1046,7 +1059,7 @@ def test_fork_keeps_prepared_argument_from_old_gv_container(root, tmp_path):
     save_snapshot(root, candidate, checkpoint=candidate.stem, model_version=1)
     root.worker.table = [NativeTarget(releases=7)]
 
-    inputs: dict[str, bytes] = {}
+    inputs: dict[str, CapturedInput] = {}
     with FlowRun(
         root, TaskLocalEnv(name="example"), 1, capture_input=inputs.__setitem__
     ) as run:
@@ -1057,16 +1070,15 @@ def test_fork_keeps_prepared_argument_from_old_gv_container(root, tmp_path):
     assert root.worker.table[0].releases == 20
 
 
-def test_derivation_combines_every_i_point_in_order(root, tmp_path):
+def test_derivation_combines_actual_outputs_of_three_flows(root, tmp_path):
     model(
         root,
         tmp_path,
         """
-        Prop value: int = 0
+        Prop seen: list[int]
         Def start(delta):
             Actions:
-                loaded = self.value
-                self.value = loaded + delta
+                self.seen.append(delta)
         """,
     )
     worker = type(root.worker)
@@ -1080,56 +1092,118 @@ def test_derivation_combines_every_i_point_in_order(root, tmp_path):
     ]
     derive_flows(origins, root=root, reset=reset, model_version=1)
 
-    def candidate(flow, index):
-        return f"{flow}/outputs/{flow}_0.{index}.snap"
-
+    all_orders = set()
     for target, delta in deltas.items():
-        sources = [name for name in deltas if name != target]
-        baseline = {f"{target}_0.{index}" for index in range(2)}
-        records = points(target)
-        entries = [record for record in records if record["base"] is not None]
-        second = [entry for entry in entries if entry["base"] in baseline]
-        third = [entry for entry in entries if entry["base"] not in baseline]
-        assert [(output(i, target)[0].worker.value) for i in range(3)] == [0, 0, delta]
-        assert len(second) == 12
-        assert {(entry["base"], entry["input_snapshot"]) for entry in second} == {
-            (base, candidate(source, index))
-            for base in baseline
-            for source in sources
-            for index in range(3)
-        }
-        expected = set()
-        for entry in second:
-            source = entry["input_snapshot"].split("/")[0]
-            other = next(name for name in sources if name != source)
-            branch = entry["name"].rsplit(".", 1)[0]
-            expected.update(
-                (record["name"], candidate(other, index))
-                for record in records
-                if record["name"].startswith(f"{branch}.")
-                for index in range(3)
-            )
-        assert len(third) == 54
-        assert {(entry["base"], entry["input_snapshot"]) for entry in third} == expected
+        sources = deltas.keys() - {target}
+        assert [output(i, target)[0].worker.seen for i in range(2)] == [[], [delta]]
+        entries = [entry for entry in points(target) if entry["base"] is not None]
+        assert {
+            entry["input_snapshot"]
+            for entry in entries
+            if "_0." in entry["input_snapshot"]
+        } == {f"{source}/outputs/{source}_0.1.snap" for source in sources}
+        for entry in entries:
+            branch = int(entry["name"].rsplit("_", 1)[1].split(".")[0])
+            all_orders.add(tuple(output(0, target, branch)[0].worker.seen))
+    assert all_orders >= {
+        (first, second, third)
+        for first in deltas.values()
+        for second in deltas.values()
+        for third in deltas.values()
+        if len({first, second, third}) == 3
+    }
 
-        # Loading a third GV still preserves the value computed by the second line.
-        source, other = sources
-        seeded = next(
-            entry
-            for entry in second
-            if entry["base"] == f"{target}_0.0"
-            and entry["input_snapshot"] == candidate(source, 2)
-        )
-        late = seeded["name"].rsplit(".", 1)[0] + ".1"
-        combined = next(
-            entry
-            for entry in third
-            if entry["base"] == late and entry["input_snapshot"] == candidate(other, 0)
-        )
-        branch_number = int(combined["name"].rsplit("_", 1)[1].split(".")[0])
-        assert (
-            output(0, target, branch_number)[0].worker.value == delta + deltas[source]
-        )
+
+def test_busy_wait_dependencies_and_feedback_to_publisher(root, tmp_path):
+    cpu_model(
+        root,
+        tmp_path,
+        """
+        Def publish():
+            Actions:
+                drive("other_wait", "notify")
+                drive("smp_started", "notify")
+                self.result = len(gv.other.history)
+        Def observe():
+            Actions:
+                self.history.append(7)
+                drive("smp_started", "wait")
+                self.result = 9
+        """,
+    )
+    cpu, wait = type(root.worker), type(root.smp_started)
+
+    def reset():
+        root.worker, root.other = cpu(), cpu()
+        root.smp_started, root.other_wait = wait(), wait()
+
+    derive_flows(
+        [
+            ActionOrigin(TaskLocalEnv("bp"), "worker", "publish"),
+            ActionOrigin(TaskLocalEnv("ap"), "other", "observe"),
+        ],
+        root=root,
+        reset=reset,
+        model_version=1,
+    )
+
+    records = {
+        name: {point["name"]: point for point in points(name)} for name in ("bp", "ap")
+    }
+    prep_path = snapshot_paths.snapshot_path("ap", 1)
+    prep_meta, prep_gv, _ = read_snapshot(root, prep_path, model_version=1)
+    assert prep_gv["other"].history == [7]
+    assert "waits_for" not in prep_meta
+    paused, _, _ = read_snapshot(
+        root, snapshot_paths.snapshot_path("ap", 2), model_version=1
+    )
+    assert "waits_for" not in paused
+    before_notify = [
+        entry
+        for entry in records["bp"].values()
+        if entry["base"] and Path(entry["input_snapshot"]).name == prep_path.name
+    ]
+    assert before_notify
+    assert all(
+        "smp_started" not in records["bp"][entry["base"]].get("notified", [])
+        for entry in before_notify
+    )
+    assert any(
+        record.get("notified") == ["other_wait"] for record in records["bp"].values()
+    )
+
+    feedback = []
+    returned = []
+    after_other_notify = []
+    for entry in records["bp"].values():
+        if entry["base"] is None:
+            continue
+        path = tmp_path / entry["input_snapshot"]
+        metadata, state, _ = read_snapshot(root, path, model_version=1)
+        base = records["bp"][entry["base"]]
+        waits_for = metadata.get("waits_for", [])
+        if waits_for:
+            assert waits_for == ["smp_started"]
+            assert "smp_started" in base["notified"]
+        elif (
+            base.get("notified") == ["other_wait"]
+            and state["other_wait"].signaled
+            and state["other"].history == [7]
+        ):
+            after_other_notify.append(entry)
+        if (
+            base["operation"]["text"] == "self.result = len(gv.other.history)"
+            and state["other"].history == [7]
+            and state["smp_started"].signaled
+        ):
+            (returned if waits_for else feedback).append(entry)
+    assert feedback
+    assert returned
+    assert after_other_notify
+    branch = int(returned[0]["name"].rsplit("_", 1)[1].split(".")[0])
+    gv, _ = output(0, "bp", branch)
+    assert gv.worker.result == 1 and gv.other.history == [7]
+    assert gv.smp_started.signaled and gv.other_wait.signaled
 
 
 @pytest.mark.parametrize("phase", ["requires", "ensures"])
@@ -1162,9 +1236,9 @@ def test_derivation_aborts_at_first_contract_failure(root, tmp_path, phase):
 
     assert failure.value.phase == phase
     entries = [point for point in points("target") if point["base"] is not None]
-    assert [point["base"] for point in entries] == ["target_0.0"] * 3
+    assert [point["base"] for point in entries] == ["target_0.0"] * 2
     assert entries[-1]["input_snapshot"] == "source/outputs/source_0.2.snap"
-    assert snapshot_paths.branch_outputs("target", 3) == []
+    assert snapshot_paths.branch_outputs("target", 2) == []
     assert all(point["base"] is None for point in points("source"))
 
 

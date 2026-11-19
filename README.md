@@ -11,16 +11,18 @@ python3 main.py
 执行 `make` 或 `make run` 会先清理生成数据，再按以下顺序推导。
 
 1. 一阶：每个 Origin 从默认 GV 和自己的 Env 启动。遇到 `break` 时从对应 O 点续跑，发现后续的 I/O 点；同一条线路再次到达同一处 `break` 时保留暂停状态。AP 的 `break(CpuFlowState.BUSYCHECK, "self", "wait")` 会先退出旧的 `wait` 保护域，续跑再进入 `wait` 检查通知。
-2. 二阶：对每一对有方向的 Flow，将来源 Flow 的所有一阶 O 点快照分别加载到目标 Flow 的每个一阶 I 点。BP → AP 和 AP → BP 分开推导。
-3. 三阶及以上：对上一阶每条线路新产生的每个 I 点，依次应用尚未参与该线路的各个 Flow 的一阶 O 点快照，最多到输入 Flow 数量对应的阶数。
+2. 二阶：将一个 Flow 的实际操作 O 点作为另一个 Flow 的 I 点候选，BP → AP 和 AP → BP 分开推导。独立启动时的初始 GV 只用来建立基线，不作为候选。
+3. 后续阶：派生 O 点也可成为候选，可以进入第三个 Flow，也可以接回已有 Flow 对应的继续位置，例如 BP → AP → BP。推导到没有新的组合为止，阶数不受 Flow 数量限制。
 
-每次分叉替换整个 GV，保留目标线路的 Env、Signal、局部值和已选契约分支。遇到语法错误、契约失败或其他执行错误时立即中止，并报告触发错误的位置。当前 BP → AP 的 52 个分支均可推导；AP → BP 在把 `ap_0.0.snap` 应用于 `bp_0.11` 的 `select_next` 时，因为 AP 的初始 GV 无法提供该 I 点引用的 `gv.initproc`，以快照兼容性错误中止。
+`SmpStarted` 继承 `framework/BusyWait.spec`。I 点记录已经发出的通知 `notified`，O 点记录通过 `wait` 所依赖的通知 `waits_for`。两者按 GV 中的实例名（例如 `smp_started`）匹配，O 点的全部依赖必须在目标 I 点上成立。尚在等待的 O 点没有这项依赖。通知后的执行前缀通过继承该通知的派生快照接续，使用通知前的独立快照无法代表这段前缀。比如 AP 在等待前的操作既可在 BP 通知前运行，也可从 BP 通知后的 O 点出发，再将 AP 的结果接回 BP。
+
+组合通过筛选后，仍替换整个 GV，并恢复目标线路的 Env、Signal、局部值和已选契约分支。通知事实随新分支传播。语法错误、契约失败、引用绑定失败或其他执行错误会立即中止，并报告触发位置。
 
 I/O 点只由 spec 的 Actions 操作行触发。非私有方法中，裸操作执行前记录 I 点，成功后保存 O 点；普通 `drive` 在 Signal 参数求值后记录 I 点，在队列处理完毕并交付结果后保存 O 点。`with` 只包住一行 `drive`（可赋给局部变量），整块共用一对 I/O 点：进 Guard 前记 I，退 Guard 后记 O。私有方法的裸操作、`drive` 和 `with` 不设点；被调的非私有方法仍按自己的 Actions 设点。`emit` 继续在入队前后设点；`break` 通过所属 CpuFlow 实例最内层活动契约的 Ensures 后保存可恢复的 O 点。
 
 方法边界、Requires/Ensures、保护域声明、解释器内部指令、`assert` 和 `pass` 不额外设点。每行裸操作是一个原子操作；Actions 中显式调用同步原语也属于裸操作。普通 Python Signal 调度仍保留，但不自动生成 spec I/O 点。
 
-`TaskLocalEnv` 必须提供当前 Flow 的 `name`，只保存 CV、调用深度和 Signal 队列。`FlowRun(gv, env, model_version)` 独立维护当前分支、I/O 计数器、I 点记录及最近的输出；不再有 Env 候选列表、`handled` 或 `range`。执行 spec 必须处于对应 Env 的活动 `FlowRun` 中；一个上下文可执行多个根 Signal，但不能嵌套或复用。
+`TaskLocalEnv` 必须提供当前 Flow 的 `name`，保存 CV、调用深度、Signal 队列和通知事实。`FlowRun(gv, env, model_version)` 独立维护当前分支、I/O 计数器、I 点记录及最近的输出；不再有 Env 候选列表、`handled` 或 `range`。执行 spec 必须处于对应 Env 的活动 `FlowRun` 中；一个上下文可执行多个根 Signal，但不能嵌套或复用。
 
 每个 Flow 在 `snapshots/<flow>/inputs/records.json` 中保存 I 点记录，在 `snapshots/<flow>/outputs/` 中保存 O 点索引和断点包。I/O 点分别以 `<flow>_<分支号>.<序号>` 独立编号。分支 0 的初始 O 保存默认 GV，其余分支以候选 O 为初始输入，首个完成操作的 O 从 0 编号。O 点的元数据字段 `input_point` 指向来源 I。路径固定相对于仓库根目录。
 

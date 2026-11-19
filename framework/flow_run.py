@@ -20,6 +20,7 @@ from framework.input_encoding import InputEncoder
 from framework.snapshot import (
     SnapshotCompatibilityError,
     SnapshotError,
+    SnapshotMetadata,
     save_output_snapshot,
 )
 from framework.spec import ActionSite, Specification
@@ -48,7 +49,16 @@ class Fork:
     pending: frozenset[str]
 
 
-type CaptureInput = Callable[[str, bytes], None]
+@dataclass(frozen=True)
+class CapturedInput:
+    frozen: bytes
+    previous_output: str
+    notified: frozenset[str]
+    control: bytes
+
+
+type CaptureInput = Callable[[str, CapturedInput], None]
+type CaptureOutput = Callable[[Path, SnapshotMetadata], None]
 type InputRecords = list[dict[str, Any]]
 
 
@@ -157,6 +167,13 @@ def require_run(env: TaskLocalEnv) -> FlowRun:
     return run
 
 
+def busy_wait_name(env: TaskLocalEnv, instance: object) -> str:
+    path = InputEncoder(require_run(env).root, env).gv_path(instance)
+    if not path or any("attribute" not in step for step in path):
+        raise ValueError("BusyWait needs a named GV instance")
+    return ".".join(step["attribute"] for step in path)
+
+
 class FlowRun:
     def __init__(
         self,
@@ -167,6 +184,7 @@ class FlowRun:
         history: tuple[Path, RunPosition, str] | None = None,
         fork: Fork | None = None,
         capture_input: CaptureInput | None = None,
+        capture_output: CaptureOutput | None = None,
         capture_all_inputs: bool = False,
     ):
         if history is not None and fork is not None:
@@ -189,6 +207,7 @@ class FlowRun:
         self._history = history
         self.fork = fork
         self.capture_input = capture_input
+        self.capture_output = capture_output
         self.capture_all_inputs = capture_all_inputs
         self._directory_fd: int | None = None
         self._buffered: _BufferedHistory | None = None
@@ -407,6 +426,8 @@ class FlowRun:
                 "operation": {"kind": kind, "text": site.text},
                 "input": InputEncoder(self.root, self.env).fields(values),
             }
+            if self.env.notified:
+                record["notified"] = sorted(self.env.notified)
             if self._buffered is None:
                 records = [*self.records, record]
                 fingerprints = {**self.spec_fingerprints, filename: fingerprint}
@@ -460,13 +481,18 @@ class FlowRun:
         path = snapshot_paths.snapshot_path(
             self.env.name, self.output_position, self.branch
         )
-        save_output_snapshot(
+        metadata = save_output_snapshot(
             self.root,
             path,
             model_version=self.model_version,
             input_point=input_point,
             continuation=continuation,
+            notified=self.env.notified,
+            waits_for=self.env.waited,
+            capture_gv_digest=self.capture_output is not None,
         )
         self.latest_output = path.relative_to(snapshot_paths.SNAPSHOT_DIR).as_posix()
         self.output_position += 1
+        if self.capture_output is not None:
+            self.capture_output(path, metadata)
         return path

@@ -38,6 +38,9 @@ class SnapshotMetadata(TypedDict):
     created_at: str
     payload_sha256: str
     input_point: NotRequired[str]
+    notified: NotRequired[list[str]]
+    waits_for: NotRequired[list[str]]
+    gv_sha256: NotRequired[str]
 
 
 class SnapshotError(Exception):
@@ -345,15 +348,31 @@ def _validate_metadata(metadata: Any) -> SnapshotMetadata:
         not isinstance(metadata["input_point"], str) or not metadata["input_point"]
     ):
         raise SnapshotFormatError("input_point must be a nonempty string")
+    for name in ("notified", "waits_for"):
+        if name in metadata and (
+            not isinstance(metadata[name], list)
+            or any(
+                not isinstance(item, str)
+                or not all(part.isidentifier() for part in item.split("."))
+                for item in metadata[name]
+            )
+        ):
+            raise SnapshotFormatError(f"invalid BusyWait instance names in {name}")
     try:
         created_at = datetime.fromisoformat(metadata["created_at"])
     except ValueError as exc:
         raise SnapshotFormatError("invalid snapshot creation time") from exc
     if created_at.utcoffset() != UTC.utcoffset(None):
         raise SnapshotFormatError("snapshot creation time must be in UTC")
-    digest = metadata["payload_sha256"]
-    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
-        raise SnapshotFormatError("invalid snapshot payload checksum")
+    for name in ("payload_sha256", "gv_sha256"):
+        if name in metadata:
+            digest = metadata[name]
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(char not in "0123456789abcdef" for char in digest)
+            ):
+                raise SnapshotFormatError(f"invalid snapshot {name} checksum")
     return cast(SnapshotMetadata, metadata)
 
 
@@ -363,6 +382,8 @@ def _new_metadata(
     model_version: int,
     input_point: str | None = None,
     format_version: int,
+    notified: frozenset[str],
+    waits_for: frozenset[str],
 ) -> SnapshotMetadata:
     if not isinstance(checkpoint, str) or not checkpoint:
         raise ValueError("checkpoint must be a nonempty string")
@@ -379,7 +400,17 @@ def _new_metadata(
     }
     if input_point is not None:
         metadata["input_point"] = input_point
+    if notified:
+        metadata["notified"] = sorted(notified)
+    if waits_for:
+        metadata["waits_for"] = sorted(waits_for)
     return metadata
+
+
+def _gv_digest(root: object) -> str:
+    stream = BytesIO()
+    _SnapshotPickler(stream, root).dump(vars(root))
+    return hashlib.sha256(stream.getbuffer()).hexdigest()
 
 
 def save_output_snapshot(
@@ -389,6 +420,9 @@ def save_output_snapshot(
     model_version: int,
     input_point: str | None,
     continuation: object | None,
+    notified: frozenset[str] = frozenset(),
+    waits_for: frozenset[str] = frozenset(),
+    capture_gv_digest: bool = False,
 ) -> SnapshotMetadata:
     """Save a FlowRun output without replacing an existing logical name."""
     if path.exists() or path.name in _index_entries(path.parent):
@@ -402,6 +436,9 @@ def save_output_snapshot(
             model_version=model_version,
             input_point=input_point,
             continuation=continuation,
+            notified=notified,
+            waits_for=waits_for,
+            capture_gv_digest=capture_gv_digest,
         )
 
     metadata = _new_metadata(
@@ -411,6 +448,8 @@ def save_output_snapshot(
         format_version=FORMAT_VERSION
         if continuation is None
         else CONTINUATION_FORMAT_VERSION,
+        notified=notified,
+        waits_for=waits_for,
     )
     try:
         stream = BytesIO()
@@ -426,6 +465,8 @@ def save_output_snapshot(
         metadata["payload_sha256"] = digest
         index_path = path.parent.resolve() / _INDEX_NAME
         if continuation is not None:
+            if capture_gv_digest:
+                metadata["gv_sha256"] = _gv_digest(root)
             span = _append_break(batch, index_path.parent / _BREAK_PACK_NAME, body)
             batch.indexes[index_path][path.name] = {**metadata, "pack": span}
         else:
@@ -457,6 +498,9 @@ def save_snapshot(
     model_version: int,
     input_point: str | None = None,
     continuation: object | None = None,
+    notified: frozenset[str] = frozenset(),
+    waits_for: frozenset[str] = frozenset(),
+    capture_gv_digest: bool = False,
 ) -> SnapshotMetadata:
     """Save all instance attributes, committing only a fully written file.
 
@@ -471,9 +515,13 @@ def save_snapshot(
         format_version=FORMAT_VERSION
         if continuation is None
         else CONTINUATION_FORMAT_VERSION,
+        notified=notified,
+        waits_for=waits_for,
     )
     temporary_path: Path | None = None
     try:
+        if continuation is not None and capture_gv_digest:
+            metadata["gv_sha256"] = _gv_digest(root)
         with tempfile.NamedTemporaryFile(
             mode="w+b",
             dir=path.parent,
