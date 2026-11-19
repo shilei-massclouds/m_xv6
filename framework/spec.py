@@ -414,6 +414,9 @@ class SpecRegistry:
         self.specifications = {spec.name: spec for spec in specs}
         if len(self.specifications) != len(specs):
             raise SpecError("duplicate specification names")
+        self.spec_fingerprints = {
+            spec.path.resolve(): spec.fingerprint for spec in specs
+        }
         self.namespace: dict[str, Any] = {
             "__builtins__": __builtins__,
             "exit_from": exit_from,

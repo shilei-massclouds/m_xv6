@@ -452,11 +452,10 @@ class Interpreter:
             self._violation(frame, "ensures", frame.branch.ensures)
 
     def _spec_fingerprints(self) -> dict[Path, str]:
-        return {
-            spec.path.resolve(): spec.fingerprint
-            for frame in self.frames
-            for spec in frame.system.__spec_registry__.specifications.values()
-        }
+        fingerprints: dict[Path, str] = {}
+        for frame in self.frames:
+            fingerprints.update(frame.system.__spec_registry__.spec_fingerprints)
+        return fingerprints
 
     def _frame_states(self) -> list[FrameState]:
         return [
