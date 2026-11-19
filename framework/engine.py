@@ -37,16 +37,33 @@ class TaskLocalEnv:
     signal_queues: list[deque[Signal]] = field(default_factory=list, repr=False)
     notified: frozenset[str] = frozenset()
     waited: frozenset[str] = frozenset()
+    next_handoff: Handoff | None = field(default=None, repr=False)
 
     def notify_busy_wait(self, instance: System) -> None:
-        from framework.flow_run import busy_wait_name
+        from framework.flow_run import named_gv_path
 
-        self.notified |= {busy_wait_name(self, instance)}
+        self.notified |= {named_gv_path(self, instance)}
 
     def observe_busy_wait(self, instance: System) -> None:
-        from framework.flow_run import busy_wait_name
+        from framework.flow_run import named_gv_path
 
-        self.waited |= {busy_wait_name(self, instance)}
+        self.waited |= {named_gv_path(self, instance)}
+
+    def prepare_handoff(self, flow: str, target: System, action: str) -> None:
+        from framework.flow_run import named_gv_path
+
+        if self.next_handoff is not None:
+            raise ValueError("a handoff is already pending")
+        if not flow.isidentifier() or not action.isidentifier():
+            raise ValueError("a handoff requires a flow name and an action name")
+        self.next_handoff = Handoff(flow, named_gv_path(self, target), action)
+
+
+@dataclass(frozen=True)
+class Handoff:
+    flow: str
+    target: str
+    action: str
 
 
 def _get_target_ref(path: str) -> System:
@@ -62,14 +79,21 @@ def _get_target_ref(path: str) -> System:
 @dataclass
 class Signal:
     source: System = field(repr=False)
-    target: str
+    target: str | System
     action: str
     args: dict[str, Any]
     env: TaskLocalEnv
     queue: deque[Signal] = field(repr=False)
 
+    def resolve_target(
+        self, resolve: Callable[[str], System] = _get_target_ref
+    ) -> System:
+        if isinstance(self.target, System):
+            return self.target
+        return self.source if self.target == "self" else resolve(self.target)
+
     def handle(self) -> Any:
-        system = self.source if self.target == "self" else _get_target_ref(self.target)
+        system = self.resolve_target()
         action = getattr(system, self.action)
         if hasattr(action, "__spec_action__"):
             from framework.interpreter import Interpreter
@@ -110,7 +134,9 @@ class System:
                 return (_get_target_ref(cast(str, declaration)),)
         return ()
 
-    def drive(self, env: TaskLocalEnv, target: str, action: str, **kwargs) -> Any:
+    def drive(
+        self, env: TaskLocalEnv, target: str | System, action: str, **kwargs
+    ) -> Any:
         """Drain this invocation's queue; the target ``self`` refers to this instance."""
         depth = env.depth
         indent = "    " * depth
@@ -131,14 +157,14 @@ class System:
             del env.signal_queues[queue_depth:]
             env.depth = depth
 
-    def emit(self, env: TaskLocalEnv, target: str, action: str, **kwargs):
+    def emit(self, env: TaskLocalEnv, target: str | System, action: str, **kwargs):
         self._emit(env, env.signal_queues[-1], target, action, **kwargs)
 
     def _emit(
         self,
         env: TaskLocalEnv,
         queue: deque[Signal],
-        target: str,
+        target: str | System,
         action: str,
         /,
         **args,
@@ -335,13 +361,19 @@ class FlowPaused(Exception):
     """Transfer a saved continuation to the Python entry point."""
 
     def __init__(
-        self, point: str, state: Enum, checkpoint: Path, site: tuple[Path, int]
+        self,
+        point: str,
+        state: Enum,
+        checkpoint: Path,
+        site: tuple[Path, int],
+        handoff: Handoff | None = None,
     ):
         super().__init__(point, state, checkpoint, site)
         self.point = point
         self.state = state
         self.checkpoint = checkpoint
         self.site = site
+        self.handoff = handoff
 
 
 def exit_from(point: str, state: str):

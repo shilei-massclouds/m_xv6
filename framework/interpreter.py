@@ -7,13 +7,21 @@ import hashlib
 import operator
 from collections import deque
 from contextlib import ExitStack
+from copy import copy
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from framework.contracts import ContractViolation, Phase
-from framework.engine import FlowPaused, Signal, TaskLocalEnv, _get_target_ref
+from framework.engine import (
+    FlowPaused,
+    Handoff,
+    Signal,
+    System,
+    TaskLocalEnv,
+    _get_target_ref,
+)
 from framework.flow_run import (
     CapturedInput,
     CaptureInput,
@@ -100,6 +108,7 @@ class ExecutionState:
 @dataclass
 class Continuation(ExecutionState):
     history: RunPosition
+    handoff: Handoff | None = field(default=None, kw_only=True)
     # Guarded drives occupy one instruction, so older program counters cannot
     # be used to resume a checkpoint, even with unchanged spec text.
     layout: int = field(default_factory=lambda: _CONTINUATION_LAYOUT, kw_only=True)
@@ -124,7 +133,7 @@ class Interpreter:
     def run(self, signal: Signal) -> Any:
         run = require_run(signal.env)
         self._check_root(run.root)
-        system = self._target(signal)
+        system = signal.resolve_target()
         if isinstance(system, SpecSystem):
             cpu_flow = system.__spec_registry__.types.get("CpuFlow")
             if cpu_flow is not None and isinstance(system, cpu_flow):
@@ -142,12 +151,6 @@ class Interpreter:
         if root is not gv:
             raise RuntimeError("FlowRun root must be the current gv")
 
-    @staticmethod
-    def _target(signal: Signal):
-        return (
-            signal.source if signal.target == "self" else _get_target_ref(signal.target)
-        )
-
     def _execute(self, run: FlowRun, replay: InputState | None = None) -> Any:
         try:
             if replay is not None:
@@ -162,7 +165,7 @@ class Interpreter:
                 if len(self.frames) < len(self.drives):
                     if drive.queue:
                         signal = drive.queue.popleft()
-                        system = self._target(signal)
+                        system = signal.resolve_target()
                         if hasattr(getattr(system, signal.action), "__spec_action__"):
                             assert isinstance(system, SpecSystem)
                             self._push(signal, system)
@@ -355,8 +358,10 @@ class Interpreter:
             else:
                 kwargs[keyword.arg] = value
         target, action = args
-        if not isinstance(target, str) or not isinstance(action, str):
-            raise SpecError("Signal target and action must be strings")
+        if not isinstance(target, (str, System)) or not isinstance(action, str):
+            raise SpecError(
+                "Signal requires a target path or System and an action name"
+            )
         queue = frame.signal.queue if operation == "emit" else deque()
         return Signal(frame.system, target, action, kwargs, frame.signal.env, queue)
 
@@ -602,6 +607,7 @@ class Interpreter:
             if restart_index is not None
             else None
         )
+        handoff, run.env.next_handoff = run.env.next_handoff, None
         continuation = Continuation(
             owner=owner,
             env=run.env,
@@ -610,11 +616,12 @@ class Interpreter:
             specs=self._spec_fingerprints(restart),
             history=run.position_after_pause(point),
             restart=restart,
+            handoff=handoff,
         )
         path = run.complete(point, continuation=continuation)
         if restart is not None:
             self._capture_input(run, point, None, restart=restart)
-        raise FlowPaused(point, state, path, (frame.specification.path, line))
+        raise FlowPaused(point, state, path, (frame.specification.path, line), handoff)
 
     def _restore(self, saved: Continuation | InputState, state: dict[str, Any]) -> None:
         if (
@@ -651,18 +658,21 @@ class Interpreter:
                 raise SnapshotCompatibilityError(
                     "invalid restart Signal in continuation"
                 )
+
+            def resolve(path: str) -> System:
+                name, *members = path.split(".")
+                target = state[name]
+                for member in members:
+                    target = getattr(target, member)
+                return target
+
             signal = restart.signal
-            target = signal.source
-            if signal.target != "self":
-                name, *members = signal.target.split(".")
-                try:
-                    target = state[name]
-                    for member in members:
-                        target = getattr(target, member)
-                except (KeyError, AttributeError) as error:
-                    raise SnapshotCompatibilityError(
-                        "cannot resolve restart target"
-                    ) from error
+            try:
+                target = signal.resolve_target(resolve)
+            except (KeyError, AttributeError) as error:
+                raise SnapshotCompatibilityError(
+                    "cannot resolve restart target"
+                ) from error
             if target is not restart.system or not hasattr(
                 getattr(target, signal.action, None), "__spec_action__"
             ):
@@ -868,3 +878,55 @@ def fork_input(
         capture_all_inputs=capture_all_inputs,
     )
     return _continue(run, state, saved)
+
+
+def start_handoff(
+    root: object,
+    path: Path,
+    model_version: int,
+    handoff: Handoff,
+    *,
+    capture_input: CaptureInput | None = None,
+    capture_output: CaptureOutput | None = None,
+) -> Any:
+    """Start another flow from this break's GV and contention state."""
+    Interpreter._check_root(root)
+    metadata, state, saved = read_snapshot(
+        root, path, model_version=model_version, expected_checkpoint=path.stem
+    )
+    if (
+        not isinstance(saved, Continuation)
+        or "input_point" not in metadata
+        or saved.handoff != handoff
+    ):
+        raise SnapshotCompatibilityError(
+            f"{path} does not contain the expected handoff"
+        )
+    name, *members = handoff.target.split(".")
+    try:
+        target = state[name]
+        for member in members:
+            target = getattr(target, member)
+    except (KeyError, AttributeError) as error:
+        raise SnapshotCompatibilityError(
+            f"{path} does not contain handoff target {handoff.target}"
+        ) from error
+    if not isinstance(target, System):
+        raise SnapshotCompatibilityError(f"invalid handoff target {handoff.target}")
+    env = TaskLocalEnv(
+        handoff.flow,
+        cv=copy(saved.env.cv),
+        notified=saved.env.notified,
+        waited=saved.env.waited,
+    )
+    with FlowRun(
+        root,
+        env,
+        model_version,
+        seed=path,
+        capture_input=capture_input,
+        capture_output=capture_output,
+        capture_all_inputs=True,
+    ):
+        root.__dict__ = state
+        return System().drive(env, target, handoff.action)

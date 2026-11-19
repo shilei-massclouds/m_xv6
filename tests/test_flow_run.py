@@ -13,11 +13,16 @@ import pytest
 
 from framework import flow_run, snapshot_paths
 from framework.contracts import ContractViolation
-from framework.derivation import derive_flows
+from framework.derivation import HandoffOrigin, derive_flows
 from framework.engine import FlowPaused, StepPoint, System, TaskLocalEnv
 from framework.flow_run import CapturedInput, FlowRun, buffer_input_records, require_run
 from framework.input_encoding import InputEncodingError
-from framework.interpreter import Continuation, fork_input, resume_checkpoint
+from framework.interpreter import (
+    Continuation,
+    fork_input,
+    resume_checkpoint,
+    start_handoff,
+)
 from framework.snapshot import (
     SnapshotCompatibilityError,
     SnapshotError,
@@ -136,6 +141,130 @@ def output(position, flow="example", branch=0):
         restored, path, model_version=1, expected_checkpoint=path.stem
     )
     return restored, metadata
+
+
+@pytest.mark.parametrize(
+    ("runnable", "first"), [(False, True), (True, True), (True, False)]
+)
+def test_cpu_handoff_starts_a_separate_proc_line(
+    root, tmp_path, monkeypatch, runnable, first
+):
+    repo = Path(__file__).resolve().parents[1]
+    fs_path = tmp_path / "FileSystem.spec"
+    fs_path.write_text(
+        "Prop initializations: int = 0\n"
+        "Def _init():\n"
+        "    Visibility TASKPRIVATE_CV\n"
+        "    Actions:\n"
+        "        self.initializations += 1\n"
+    )
+    registry = SpecRegistry(
+        [
+            repo / "flows/CpuFlow.spec",
+            repo / "kernel/Page.spec",
+            repo / "flows/ProcFlow.spec",
+            repo / "kernel/ProcTable.spec",
+            repo / "kernel/FirstProcFlag.spec",
+            fs_path,
+        ]
+    )
+    root.worker = registry.model("CpuFlow")()
+    table = registry.model("ProcTable")()
+    flag = registry.model("FirstProcFlag")()
+    flag.first = first
+    fs = registry.model("FileSystem")()
+    monkeypatch.setattr(root, "proc_table", table, raising=False)
+    monkeypatch.setattr(root, "first_proc_flag", flag, raising=False)
+    monkeypatch.setattr(root, "fs", fs, raising=False)
+    if runnable:
+        # Only the queue supplies the selected instance in this fixture.
+        root.other = registry.model("ProcFlow")()
+        root.other.state = registry.namespace["ProcState"].RUNNABLE
+        table.table.append(root.other)
+
+    cpu_env = TaskLocalEnv("example", notified=frozenset({"boot"}))
+    cpu_env.cv.expose("remote_irq", "remote_tasks")
+    with FlowRun(root, cpu_env, 1):
+        if not runnable:
+            System().drive(cpu_env, "worker", "schedule")
+            assert root.worker.state.name == "WFI" and flag.first
+            assert fs.initializations == 0
+            return
+        with pytest.raises(FlowPaused) as paused:
+            System().drive(cpu_env, "worker", "schedule")
+
+    checkpoint, handoff = paused.value.checkpoint, paused.value.handoff
+    assert handoff is not None
+    assert (handoff.flow, handoff.target, handoff.action) == ("proc", "other", "start")
+    _, state, saved = read_snapshot(root, checkpoint, model_version=1)
+    assert isinstance(saved, Continuation) and saved.restart is not None
+    assert saved.restart.signal.action == "schedule"
+    assert state["worker"].state.name == "SWITCHED"
+    assert state["worker"].last_selected_proc is state["other"]
+    assert not state["proc_table"].table
+    assert (
+        state["other"].state.name == "RUNNABLE" and state["other"].priv.name == "KERNEL"
+    )
+    assert state["first_proc_flag"].first is first
+    assert state["fs"].initializations == 0
+
+    def check_env(self, env, target, action, **kwargs):
+        assert env.name == "proc"
+        assert env.depth == 0 and not env.signal_queues
+        assert vars(env.cv) == vars(cpu_env.cv) and env.cv is not cpu_env.cv
+        assert env.notified == cpu_env.notified
+        return drive(self, env, target, action, **kwargs)
+
+    drive = System.drive
+    with monkeypatch.context() as patch:
+        patch.setattr(System, "drive", check_env)
+        start_handoff(root, checkpoint, 1, handoff)
+
+    assert root.other.state.name == "RUNNING" and root.other.priv.name == "USER"
+    assert not vars(root)["first_proc_flag"].first
+    assert vars(root)["fs"].initializations == int(first)
+    assert points("proc")[0]["input_snapshot"] == f"example/outputs/{checkpoint.name}"
+    assert all(point["location"]["file"] != "flows/ProcFlow.spec" for point in points())
+    # The source can still resume from the very same checkpoint independently.
+    resume_checkpoint(root, checkpoint, 1)
+    assert root.worker.state.name == "WFI" and root.other.priv.name == "KERNEL"
+
+
+def test_derivation_launches_handoff_origin_and_uses_its_outputs(root, tmp_path):
+    cpu_model(
+        root,
+        tmp_path,
+        """
+        Def start():
+            Actions:
+                env.prepare_handoff("dependent", gv.other, "observe")
+                break(CpuFlowState.BUSYCHECK)
+                self.history.append(1)
+        Def observe():
+            Actions:
+                self.history.append(9)
+        """,
+    )
+    derive_flows(
+        [
+            ActionOrigin(TaskLocalEnv("source"), "worker", "start"),
+            HandoffOrigin("dependent"),
+        ],
+        root=root,
+        reset=lambda: None,
+        model_version=1,
+    )
+    first = points("dependent")[0]
+    assert first["input_snapshot"] == "source/outputs/source_0.2.snap"
+    assert first["name"] == "dependent_0.0"
+    resumed = next(
+        record
+        for record in points("source")
+        if record["input_snapshot"] == "dependent/outputs/dependent_0.0.snap"
+    )
+    assert resumed["base"] == "source_0.2"
+    gv, _ = output(0, "source", branch=1)
+    assert gv.worker.history == [1] and gv.other.history == [9]
 
 
 @pytest.mark.parametrize("action", ["start", "_start"])
@@ -711,16 +840,17 @@ def test_resume_preserves_pending_emits_and_primary_return_value(root, tmp_path)
     assert root.other.state.name == "RUNNING"
 
 
+@pytest.mark.parametrize("wait_target", ['"self"', "self"])
 def test_labeled_break_fork_reuses_original_arguments_and_return_position(
-    root, tmp_path
+    root, tmp_path, wait_target
 ):
     cpu_model(
         root,
         tmp_path,
-        """
+        f"""
         Def start():
             Actions:
-                self.result = drive("self", "wait_for", value=self.result)
+                self.result = drive({wait_target}, "wait_for", value=self.result)
                 self.history.append(self.result)
         Def wait_for(value) -> result:
             Actions:

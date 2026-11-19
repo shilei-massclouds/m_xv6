@@ -7,6 +7,7 @@ Enum CpuFlowState:
 
 Visibility CPUSCOPE_CV
 Prop state: CpuFlowState = CpuFlowState.RUNNING
+Prop last_selected_proc: ProcFlow | None = None
 
 Def schedule():
     Actions:
@@ -17,9 +18,9 @@ Def schedule():
 Def _schedule():
     Actions:
         next_runnable = drive("proc_table", "pick_runnable")
-        drive("self", "select_next", next_runnable=next_runnable)
+        drive("self", "_select_next", next_runnable=next_runnable)
 
-Def select_next(next_runnable):
+Def _select_next(next_runnable):
     Requires:
         next_runnable is None
     Actions:
@@ -30,6 +31,8 @@ Def select_next(next_runnable):
     Requires:
         next_runnable is not None
     Actions:
-        self.state = CpuFlowState.SWITCHED
+        self.last_selected_proc = next_runnable
+        env.prepare_handoff("proc", next_runnable, next_runnable.entry)
+        break(CpuFlowState.SWITCHED, "self", "schedule")
     Ensures:
         self.state is CpuFlowState.SWITCHED

@@ -7,11 +7,12 @@ from framework.snapshot import SnapshotError
 from global_vars import MODEL_VERSION, gv
 from origins.ap_init_origin import ApInitOrigin
 from origins.bp_init_origin import BpInitOrigin
+from origins.proc_origin import ProcOrigin
 
 
 def main() -> None:
     derive_flows(
-        [BpInitOrigin(), ApInitOrigin()],
+        [BpInitOrigin(), ApInitOrigin(), ProcOrigin()],
         root=gv,
         reset=gv.reset,
         model_version=MODEL_VERSION,

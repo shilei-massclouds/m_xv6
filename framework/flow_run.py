@@ -167,10 +167,10 @@ def require_run(env: TaskLocalEnv) -> FlowRun:
     return run
 
 
-def busy_wait_name(env: TaskLocalEnv, instance: object) -> str:
+def named_gv_path(env: TaskLocalEnv, instance: object) -> str:
     path = InputEncoder(require_run(env).root, env).gv_path(instance)
     if not path or any("attribute" not in step for step in path):
-        raise ValueError("BusyWait needs a named GV instance")
+        raise ValueError("expected a named GV instance")
     return ".".join(step["attribute"] for step in path)
 
 
@@ -183,12 +183,13 @@ class FlowRun:
         *,
         history: tuple[Path, RunPosition, str] | None = None,
         fork: Fork | None = None,
+        seed: Path | None = None,
         capture_input: CaptureInput | None = None,
         capture_output: CaptureOutput | None = None,
         capture_all_inputs: bool = False,
     ):
-        if history is not None and fork is not None:
-            raise ValueError("resume and fork are separate entry points")
+        if sum(item is not None for item in (history, fork, seed)) > 1:
+            raise ValueError("resume, fork and handoff are separate entry points")
         self.root = root
         self.env = env
         self.model_version = model_version
@@ -206,6 +207,7 @@ class FlowRun:
         self._records_path = snapshot_paths.input_records_path(env.name)
         self._history = history
         self.fork = fork
+        self.seed = seed
         self.capture_input = capture_input
         self.capture_output = capture_output
         self.capture_all_inputs = capture_all_inputs
@@ -247,6 +249,8 @@ class FlowRun:
                 self._restore_history(*self._history)
             elif self.fork is not None:
                 self._start_fork(self.fork)
+            elif self.seed is not None:
+                self._start_seed(inputs, outputs, self.seed)
             else:
                 if any(
                     folder.exists() and any(folder.iterdir())
@@ -325,15 +329,36 @@ class FlowRun:
         names = {record["name"] for record in self.records}
         if fork.base not in names or not fork.pending <= names:
             raise SnapshotCompatibilityError("fork refers to a missing I point")
+        self._start_branch(fork.candidate)
+        self._pending = set(fork.pending)
+
+    def _start_branch(self, source: Path) -> None:
         self.branch = 1 + max(
-            int(name.rsplit("_", 1)[1].split(".")[0]) for name in names
+            (
+                int(record["name"].rsplit("_", 1)[1].split(".")[0])
+                for record in self.records
+            ),
+            default=-1,
         )
         self.latest_output = (
-            fork.candidate.resolve()
+            source.resolve()
             .relative_to(snapshot_paths.SNAPSHOT_DIR.resolve())
             .as_posix()
         )
-        self._pending = set(fork.pending)
+
+    def _start_seed(self, inputs: Path, outputs: Path, source: Path) -> None:
+        inputs.mkdir(exist_ok=True)
+        outputs.mkdir(exist_ok=True)
+        if (
+            self._buffered is not None and self._buffered.records is not None
+        ) or self._records_path.exists():
+            self._load_records()
+        elif any(outputs.iterdir()):
+            raise SnapshotCompatibilityError("handoff outputs have no I point history")
+        elif self._buffered is not None:
+            self._buffered.records = self.records
+            self._buffered.fingerprints = self.spec_fingerprints
+        self._start_branch(source)
 
     def _restore_history(self, path: Path, position: RunPosition, point: str) -> None:
         flow = self.env.name

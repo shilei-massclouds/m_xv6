@@ -1,6 +1,6 @@
 # Spec 解释执行
 
-第一份输入是移入 `kernel/ProcTable.spec` 的 `_pick_runnable` 定义。BP、AP 和 InitProc 均已迁移为 spec 解释执行，入口为 `flows/BpInitFlow.spec`、`flows/ApInitFlow.spec` 和 `flows/InitProcFlow.spec`。`flows/model_specs.py` 统一注册对象定义，包括它们实际依赖的内核、驱动、文件系统和结构对象。
+第一份输入是移入 `kernel/ProcTable.spec` 的 `_pick_runnable` 定义。BP 和 AP 的入口为 `flows/BpInitFlow.spec` 和 `flows/ApInitFlow.spec`，进程是交接后独立推导的 `flows/ProcFlow.spec`。`flows/model_specs.py` 统一注册对象定义。
 
 ```python
 from framework.engine import System, TaskLocalEnv
@@ -15,9 +15,9 @@ with FlowRun(gv, env, MODEL_VERSION):
 assert result is None
 ```
 
-`make run` 清理生成数据后分别从默认 GV、Env 独立运行 BP 和 AP。AP 首轮在 `BUSYCHECK` 保存可恢复的 O 点，随后从这个点续跑一次。两次 AP 推导各暂存首个 I 点，用 BP 的每份 O 快照为这两个 I 点分别生成派生分支。InitProc 暂不接入 `main.py`；手动调用也需显式使用 `FlowRun`，该上下文本身复用传入 GV。注册入口的路径相对于仓库根目录解析。GV 模型均通过 `flows.model_specs.new_model(...)` 创建，需要类型或枚举时使用 `registry.model("CpuFlow")`、`registry.namespace["CpuFlowState"]` 等注册项。
+`make run` 清理生成数据后分别从默认 GV、Env 独立运行 BP 和 AP。AP 首轮在 `BUSYCHECK` 保存可恢复的 O 点，随后从这个点续跑一次。后续跨 Flow 组合可以让 AP 收到 BP 的启动通知并进入调度。GV 模型通过 `flows.model_specs.new_model(...)` 创建，需要类型或枚举时使用 `registry.model("CpuFlow")`、`registry.namespace["CpuFlowState"]` 等注册项。
 
-BP 和 AP 继承同一份 `CpuFlow.spec`，调度器通过 `next_runnable = drive("proc_table", "pick_runnable")` 接收 spec 返回值，不再使用 Holder 输出参数。InitProc 的首次执行检查也直接接收 `FirstProc.spec` 的布尔返回值；首次进入时调用文件系统初始化和进程 `_kexec`，最后切换到用户态。
+BP 和 AP 继承同一份 `CpuFlow.spec`。调度器取出进程后，在私有 `_select_next` 中记录交接，再用 `break(CpuFlowState.SWITCHED, "self", "schedule")` 保存 O 点。从这个 O 点可以重进 CPU 的 `schedule()`，也可以启动独立的 `ProcFlow.start()`。进程进入时必须处于内核态且可运行；它通过 `FirstProcFlag.check()` 选择是否调用一次性的文件系统初始化和自身 `_kexec`，最后进入用户态。Proc 的 `switch_ret()` 暂无动作。
 
 spec 文件名是对象类型名。`Prop table: list[Proc]` 为每个实例创建独立列表，也可以使用 `Prop value: int = 0` 显式指定默认表达式。属性注解描述模型。枚举通过 `Enum Name:` 声明，无赋值的成员以名称的小写形式为值。`Parent Name` 和 `Extends Name` 均引用同一 registry 中的另一个 spec。
 
@@ -31,9 +31,9 @@ spec 文件名是对象类型名。`Prop table: list[Proc]` 为每个实例创�
 
 Actions 支持赋值、属性/下标赋值、表达式语句、`assert`、`pass`、`with` 保护域，以及 `+=`、`-=`、`*=`。每个操作必须完整写在一个物理行中，不能用括号或反斜杠跨行，也不能在同一行通过分号串联多个操作。`with` 的头部占一行，可叠加多个 Guard；块内恰好一行 `drive(...)` 或 `局部变量 = drive(...)`。表达式采用 Python 表达式求值，spec 与原 Python 模型一样是可信程序输入。
 
-spec 禁止 `if/else` 语句和条件表达式，分支选择通过互斥的 Requires/Actions/Ensures 组表达。如果判断依赖前一个操作或 Signal 的结果，先完成公共前缀，再将结果作为参数交给带分支的方法；不能把这个判断提前到公共前缀执行之前。`CpuFlow.select_next`、`InitProcFlow.first_init` 和 `ProcTable.set_initproc` 是现有示例。
+spec 禁止 `if/else` 语句和条件表达式，分支选择通过互斥的 Requires/Actions/Ensures 组表达。如果判断依赖前一个操作或 Signal 的结果，先完成公共前缀，再将结果作为参数交给带分支的方法；不能把这个判断提前到公共前缀执行之前。`CpuFlow._select_next`、`ProcFlow._first_init` 和 `ProcTable.set_initproc` 是现有示例。
 
-Signal 调用写成 `drive("target", "action", key=value)`，可直接调用或作为赋值右侧。`emit("target", "action", key=value)` 单独成行，将 Signal 加到当前 `drive` 自己的 FIFO 队列。每个 Signal 的方法完成后，解释器处理队列中的下一项，队列清空时向调用方交付首个 Signal 的结果。`self` 指向发出 Signal 的当前对象，其他 target 从当前 `gv` 解析。`Visibility CPUSCOPE_CV` 和 `ProtectedBy io` 可声明在类型或方法上。
+Signal 调用写成 `drive(target, "action", key=value)`，可直接调用或作为赋值右侧。`emit(target, "action", key=value)` 单独成行，将 Signal 加到当前 `drive` 自己的 FIFO 队列。每个 Signal 的方法完成后，解释器处理队列中的下一项，队列清空时向调用方交付首个 Signal 的结果。`"self"` 指向发出 Signal 的对象，其他字符串按当前 `gv` 路径解析；也可以用表达式传入一个 `System` 对象，Signal 直接保存该对象的引用。`Visibility CPUSCOPE_CV` 和 `ProtectedBy io` 可声明在类型或方法上。
 
 `framework/spec.py` 解析定义并注册对象类型。`framework/interpreter.py` 用循环和显式 Frame 栈推进 Actions。Frame 保存 Signal、指令位置、局部变量、契约分支和保护域。每次 `drive` 的队列还携带未完成的调用位置和已产生的首个结果。框架支持 Python Signal 目标，可恢复的调用链由显式 spec Frame 组成。
 
@@ -43,11 +43,13 @@ Signal 调用写成 `drive("target", "action", key=value)`，可直接调用或�
 
 带恢复入口的 `break` 选中栈上最近的匹配调用；`"self"` 指执行 `break` 的对象。解释器退出该调用及其后代的保护域，不把这些栈帧当作正常返回。断点 O 保存被选中调用的原始 Signal、待交付结果的调用位置，以及剩余栈和 Env。续跑用原实参重新进入该方法，重新检查 CV 和 Requires；已完成的 GV 变化不回滚。被放弃的内部 `drive` 或 `with` 保留 I 记录，没有对应的完成 O；原调用直到正常返回才完成。
 
+`env.prepare_handoff(flow, target, action)` 为接下来的 `break` 记录接收线路、目标对象的 GV 路径和入口。交接随该 O 点保存，原线路仍按普通 `break` 规则续跑。注册的 `HandoffOrigin` 只通过交接启动：读取该 O 点的 GV、CV 和通知事实，使用新的 Env 和 Signal 队列。推导器根据交接记录启动线路，使用同一套规则处理不同的 CpuFlow 状态。接收线路已经执行操作之后，其他线路需要接回它对应的 I 点，才能用候选 GV 延续该前缀。
+
 AP 的 `_wait` 用 `break(CpuFlowState.BUSYCHECK, "self", "wait")` 退出 `wait` 的保护域。用其他 GV 分叉时，`break` 的 I 记录关联的是退出保护后的恢复入口。候选 GV 可在这里提供 `SmpStarted.signaled`；AP 的 `BUSYCHECK` 和待完成的 `wait` 调用会保留。续跑重新进入 `wait`，按当前通知值继续或再次暂停。
 
 `SmpStarted` 继承一次性通知原语 `BusyWait`。实例以其 GV 属性路径（如 `smp_started`）标识。成功执行 `notify` 后记录通知；通过 `wait` 时记录对此通知的依赖，暂停等待时不记录依赖。这些事实随 Env 传递，不额外产生 I/O 点。
 
-生成的类型和回调函数注册在指定 Python 模块中，因此对象图可以沿用现有 Pickle 快照。统一导出模块为 `flows.model_specs`，新进程导入 `global_vars` 时会自动注册。模型版本保持为 9；删除未使用的 Python 模型及导出壳不改变类型路径，现有版本 9 的快照继续兼容，其他模型版本需重新生成。另一个进程加载这些对象前，必须先注册相同的 spec；spec 内容和类型定义需要兼容。
+生成的类型和回调函数统一注册在 `flows.model_specs`，新进程导入 `global_vars` 时会自动注册。模型版本为 10；进程模型和 GV 字段变更前的快照需要重新生成。另一个进程加载快照前，必须先注册兼容的 spec。
 
 设点严格针对 spec 的 Actions 源操作行，裸操作一行是一个原子操作。解析器为这些行附加源位置；方法入口/出口、Requires/Ensures、保护域进入/退出、解释器内部指令、`assert` 和 `pass` 不触发设点。Actions 中显式执行的同步原语调用属于裸操作，适用同样的设点规则。Python Origin 发出的根 Signal 不来自 Actions，不单独设点；根方法内部的 Actions 按所属方法设点。
 

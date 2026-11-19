@@ -1,8 +1,8 @@
 # m_xv6
 
-BP、AP 和 InitProc Flow 均由 spec 描述并解释执行，入口分别为 `flows/BpInitFlow.spec`、`flows/ApInitFlow.spec` 和 `flows/InitProcFlow.spec`，依赖对象也由各目录中的 spec 定义。`flows/model_specs.py` 统一注册模型，`global_vars.py` 通过 `new_model(...)` 创建 Flow 及其依赖对象。语法、执行语义和验证方式见 [framework/SPEC.md](framework/SPEC.md)。
+BP、AP 和 Proc 是三条独立的推导线路，分别由 `flows/BpInitFlow.spec`、`flows/ApInitFlow.spec` 和 `flows/ProcFlow.spec` 描述。`flows/model_specs.py` 统一注册模型，`global_vars.py` 通过 `new_model(...)` 创建 Flow 及其依赖对象。语法、执行语义和验证方式见 [framework/SPEC.md](framework/SPEC.md)。
 
-当前入口 `main.py` 将 `[BpInitOrigin(), ApInitOrigin()]` 传给通用推导器：
+当前入口 `main.py` 将 `[BpInitOrigin(), ApInitOrigin(), ProcOrigin()]` 传给通用推导器：
 
 ```sh
 python3 main.py
@@ -10,9 +10,9 @@ python3 main.py
 
 执行 `make` 或 `make run` 会先清理生成数据，再按以下顺序推导。
 
-1. 一阶：每个 Origin 从默认 GV 和自己的 Env 启动。遇到 `break` 时从对应 O 点续跑，发现后续的 I/O 点；同一条线路再次到达同一处 `break` 时保留暂停状态。AP 的 `break(CpuFlowState.BUSYCHECK, "self", "wait")` 会先退出旧的 `wait` 保护域，续跑再进入 `wait` 检查通知。
+1. 一阶：BP 和 AP 各从默认 GV 和自己的 Env 启动。遇到 `break` 时从对应 O 点续跑，发现后续的 I/O 点；同一条线路再次到达同一处 `break` 时保留暂停状态。AP 的 `break(CpuFlowState.BUSYCHECK, "self", "wait")` 会先退出旧的 `wait` 保护域，续跑再进入 `wait` 检查通知。
 2. 二阶：将一个 Flow 的实际操作 O 点作为另一个 Flow 的 I 点候选，BP → AP 和 AP → BP 分开推导。独立启动时的初始 GV 只用来建立基线，不作为候选。
-3. 后续阶：派生 O 点也可成为候选，可以进入第三个 Flow，也可以接回已有 Flow 对应的继续位置，例如 BP → AP → BP。推导到没有新的组合为止，阶数不受 Flow 数量限制。
+3. 后续阶：派生 O 点也可成为候选，可以进入第三个 Flow，也可以接回已有 Flow 对应的继续位置，例如 BP → AP → BP。任何阶产生的 CPU 交接 O 点都可以启动 Proc；Proc 的 O 点同样参与组合。推导到没有新的组合为止。
 
 `SmpStarted` 继承 `framework/BusyWait.spec`。I 点记录已经发出的通知 `notified`，O 点记录通过 `wait` 所依赖的通知 `waits_for`。两者按 GV 中的实例名（例如 `smp_started`）匹配，O 点的全部依赖必须在目标 I 点上成立。尚在等待的 O 点没有这项依赖。通知后的执行前缀通过继承该通知的派生快照接续，使用通知前的独立快照无法代表这段前缀。比如 AP 在等待前的操作既可在 BP 通知前运行，也可从 BP 通知后的 O 点出发，再将 AP 的结果接回 BP。
 
@@ -32,15 +32,15 @@ I/O 点只由 spec 的 Actions 操作行触发。非私有方法中，裸操作�
 
 操作失败、契约失败或 StepPoint 不生成对应 O 点；已经保存的内部操作输出保留。需要设点的操作必须先成功记录 I 点。O 保存失败时保留原编号和已有文件。异常后清理保护域和 Frame。再次首轮运行前可用 `make clean_snap` 清理生成记录、快照和临时文件。
 
-InitProc 的 spec 保留，目前不作为独立 Flow 参与推导。`FlowRun` 本身不重置 GV；一阶推导由 `derive_flows` 在每个 Origin 启动前恢复默认 GV。
+`FlowRun` 本身不重置 GV；一阶推导由 `derive_flows` 在 BP 和 AP 启动前恢复默认 GV。独立的 Proc 线路从选中它的 CPU 的交接 O 点加载 GV；它复制该点的 CV 和通知事实，用新的调用栈和 Signal 队列开始，在 `snapshots/proc/` 记录 I/O 点。
 
-`GlobalVars.initproc` 是初始为 `None` 的可选进程引用，不预先创建进程；模型暂时没有 `childproc` 字段。BP 的 `userinit` 调用 `ProcTable._alloc` 创建进程、分配资源，并在其进入 `RUNNABLE` 状态后通过 `put_runnable(task=proc)` 入队。首次分配会设置 `gv.initproc`，后续分配创建独立进程，并保留该引用。
+`GlobalVars.initproc` 初始为 `None`，是当前唯一 `ProcFlow` 实例的引用。BP 的 `userinit` 调用 `ProcTable._alloc` 创建进程，预设入口为 `start`，分配资源并在进入 `RUNNABLE` 后入队。队列和 `gv.initproc` 引用同一个对象。
 
-`ProcTable.table: list[Proc]` 保存可运行进程引用；`pick_runnable` 移除并取出队首，空队列则输出 `None`。快照既支持分配前的 `initproc is None` 状态，也会保持分配后队列元素与 `gv.initproc` 的对象身份关系；额外进程可以只通过队列或其他模型对象引用。
+`pick_runnable` 取出队首。空队列时 CPU 进入 `WFI`；选中进程时记录交接目标和入口，用 `break(CpuFlowState.SWITCHED, "self", "schedule")` 保存快照。CPU 可从该点重新进入 `schedule()`，而 Proc 可从同一个 GV 执行 `start()`。进程进入 `RUNNING` 后用 `FirstProcFlag` 决定是否调用一次性的文件系统初始化和 `_kexec`，最后切换到用户态。Proc 的 `switch_ret()` 是预留的再次调度入口。
 
-当前模型版本为 9，生成类型及回调的注册模块仍为 `flows.model_specs`。清理旧 Python 模型不改变模型结构和类型路径，现有版本 9 的快照可以继续加载；其他模型版本的快照按不兼容处理。`make run` 会清理并重建 BP、AP 自动快照。`snapshots/README.md` 随代码提交以保留目录，运行时生成文件加入忽略规则。
+当前模型版本为 10，生成类型及回调的注册模块为 `flows.model_specs`。进程入口和 GV 字段已变更，旧快照需要用 `make run` 重新生成。`snapshots/README.md` 随代码提交以保留目录，运行时生成文件加入忽略规则。
 
-`System.drive(env, "self", action, **kwargs)` 和 `System.emit(env, "self", action, **kwargs)` 将目标绑定到调用它们的 System 实例。创建 Signal 时通过 `source` 保存该实例的引用，处理时解析 `"self"`，随后按原有流程执行 `acquire`、目标方法和 `release`。其他目标名称仍通过 `gv` 路径查找。
+`drive` 和 `emit` 接受三种目标：`"self"` 指向发出 Signal 的对象，其他字符串按 `gv` 路径解析，也可以直接传入一个 `System` 实例。交接入口从保存的 GV 解析目标，将入口 Signal 送到实际选中的进程。
 
 嵌套调用和 `emit` 各自记录当前调用对象。队列中的信号保留其来源对象；快照恢复时，来源引用与恢复后的对象图保持一致。
 
@@ -111,7 +111,7 @@ def adjust(self, amount):
 
 入口没有成立的分支，或选中出口行没有成立的条件时，立即抛出 `ContractViolation`，未捕获时程序终止。错误消息报告调用处的文件、行号、函数/方法名和 `requires`/`ensures` 阶段，也可以通过异常的 `filename`、`lineno`、`function`、`phase` 属性读取。出口失败还报告从 0 开始的入口分支索引 `branch_index`。`python -O` 下仍然检查。
 
-Python 契约函数的入口选择保存在当前 Python 调用帧的保留局部变量 `__m_xv6_contract_state__` 中，随调用结束释放；直接调用、嵌套、递归及交错恢复的生成器各自独立。Python 调用者在方法入口和正常出口显式放置检查，框架不自动包装方法或补跑遗漏的出口检查。spec 契约由解释器在对应 Frame 中选择入口并检查出口，详见 [framework/SPEC.md](framework/SPEC.md)。BP 和 AP 的 `_start` 检查 Flow 的状态，InitProc 检查内核态到用户态，`ProcTable._pick_runnable` 和 `_put_runnable` 按入口队列为空或非空的分支检查出口。
+Python 契约函数的入口选择保存在当前 Python 调用帧的保留局部变量 `__m_xv6_contract_state__` 中，随调用结束释放；直接调用、嵌套、递归及交错恢复的生成器各自独立。Python 调用者在方法入口和正常出口显式放置检查，框架不自动包装方法或补跑遗漏的出口检查。spec 契约由解释器在对应 Frame 中选择入口并检查出口，详见 [framework/SPEC.md](framework/SPEC.md)。BP 和 AP 的 `_start` 检查 Flow 的状态，`ProcFlow.start` 检查从内核态的可运行进程进入用户态，`ProcTable._pick_runnable` 和 `_put_runnable` 按入口队列为空或非空的分支检查出口。
 
 契约函数不保存、加载或回滚状态。契约失败会终止本次调用，调用它的 spec drive 行不生成 O 点，之前成功操作的快照保留。
 

@@ -5,14 +5,13 @@ from dataclasses import dataclass, field
 from flows.model_specs import new_model
 from framework.engine import System
 
-MODEL_VERSION = 9
+MODEL_VERSION = 10
 
 
 @dataclass
 class GlobalVars:
     bp_init_flow: System = field(default_factory=lambda: new_model("BpInitFlow"))
     ap_init_flow: System = field(default_factory=lambda: new_model("ApInitFlow"))
-    initproc_flow: System = field(default_factory=lambda: new_model("InitProcFlow"))
     console: System = field(default_factory=lambda: new_model("Console"))
     io: System = field(default_factory=lambda: new_model("IO"))
     uart: System = field(default_factory=lambda: new_model("Uart"))
@@ -34,7 +33,7 @@ class GlobalVars:
     initproc: System | None = None
     pidgen: System = field(default_factory=lambda: new_model("PidGen"))
     smp_started: System = field(default_factory=lambda: new_model("SmpStarted"))
-    first_proc: System = field(default_factory=lambda: new_model("FirstProc"))
+    first_proc_flag: System = field(default_factory=lambda: new_model("FirstProcFlag"))
     fs: System = field(default_factory=lambda: new_model("FileSystem"))
 
     def reset(self):

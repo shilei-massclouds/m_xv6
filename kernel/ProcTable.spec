@@ -1,4 +1,4 @@
-Prop table: list[Proc]
+Prop table: list[ProcFlow]
 
 Def _pick_runnable() -> nextp:
     Requires:
@@ -30,7 +30,7 @@ Def _mapstacks():
 Def _alloc():
     Actions:
         # TODO: check that _mapstacks has been called.
-        proc = Proc()
+        proc = ProcFlow()
         assert proc.state is ProcState.UNUSED, "process must be unused before initialization"
         proc.pid = drive("pidgen", "_alloc")
         proc.state = ProcState.USED
