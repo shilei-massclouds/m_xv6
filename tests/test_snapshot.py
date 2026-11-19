@@ -2,10 +2,20 @@
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
-from framework.snapshot import SnapshotFormatError, load_snapshot, save_snapshot
+from framework import snapshot_paths
+from framework.snapshot import (
+    SnapshotCompatibilityError,
+    SnapshotError,
+    SnapshotFormatError,
+    deduplicate_outputs,
+    load_snapshot,
+    save_output_snapshot,
+    save_snapshot,
+)
 
 
 @dataclass
@@ -51,3 +61,58 @@ def test_invalid_optional_input_point_in_header_is_rejected(tmp_path):
     path.write_bytes(magic + b"\n" + json.dumps(metadata).encode() + b"\n" + rest)
     with pytest.raises(SnapshotFormatError, match="input_point"):
         load_snapshot(Root(), path, model_version=9)
+
+
+def test_identical_outputs_share_body_but_keep_logical_metadata(tmp_path, monkeypatch):
+    monkeypatch.setattr(snapshot_paths, "SNAPSHOT_DIR", tmp_path)
+    bp = snapshot_paths.snapshot_path("bp", 0)
+    ap = snapshot_paths.snapshot_path("ap", 3)
+    original = Root()
+    original.self_ref = original
+    with deduplicate_outputs():
+        for path, point in [(bp, None), (ap, "ap_0.2")]:
+            path.parent.mkdir(parents=True)
+            save_output_snapshot(
+                original, path, model_version=9, input_point=point, continuation=None
+            )
+            assert not path.exists()
+            assert not (path.parent / "index.json").exists()
+        assert snapshot_paths.branch_outputs("bp", 0) == [bp]
+        assert load_snapshot(Root(), ap, model_version=9).get("input_point") == "ap_0.2"
+        with pytest.raises(SnapshotError, match="refusing to overwrite"):
+            save_output_snapshot(
+                original, ap, model_version=9, input_point=None, continuation=None
+            )
+
+    assert snapshot_paths.branch_outputs("ap", 0) == [ap]
+    bodies = list((tmp_path / ".objects").glob("*.snap-body"))
+    assert len(bodies) == 1
+    for path, point in [(bp, None), (ap, "ap_0.2")]:
+        restored = Root(value=0)
+        metadata = load_snapshot(
+            restored, path, model_version=9, expected_checkpoint=path.stem
+        )
+        assert restored.value == 3 and restored.self_ref is restored
+        assert metadata.get("input_point") == point
+        assert bodies[0].stem == metadata["payload_sha256"]
+    with pytest.raises(SnapshotCompatibilityError, match="checkpoint mismatch"):
+        load_snapshot(Root(), bp, model_version=9, expected_checkpoint=ap.stem)
+    with pytest.raises(SnapshotCompatibilityError, match="model_version"):
+        load_snapshot(Root(), bp, model_version=8)
+
+    bodies[0].write_bytes(b"damaged")
+    restored = Root(value=0)
+    with pytest.raises(SnapshotFormatError, match="checksum mismatch"):
+        load_snapshot(restored, ap, model_version=9)
+    assert restored.value == 0
+
+
+def test_output_index_is_published_when_derivation_raises(tmp_path: Path):
+    output = tmp_path / "bp" / "outputs" / "bp_0.0.snap"
+    output.parent.mkdir(parents=True)
+    with pytest.raises(RuntimeError, match="contract failed"), deduplicate_outputs():
+        save_output_snapshot(
+            Root(), output, model_version=9, input_point=None, continuation=None
+        )
+        raise RuntimeError("contract failed")
+    assert load_snapshot(Root(), output, model_version=9)["checkpoint"] == output.stem

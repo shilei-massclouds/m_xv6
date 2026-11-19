@@ -17,7 +17,11 @@ from typing import Any, Self
 from framework import snapshot_paths
 from framework.engine import FlowPaused, TaskLocalEnv
 from framework.input_encoding import InputEncoder
-from framework.snapshot import SnapshotCompatibilityError, SnapshotError, save_snapshot
+from framework.snapshot import (
+    SnapshotCompatibilityError,
+    SnapshotError,
+    save_output_snapshot,
+)
 from framework.spec import ActionSite, Specification
 
 RECORD_VERSION = 1
@@ -322,7 +326,7 @@ class FlowRun:
         try:
             outputs = {
                 entry.name
-                for entry in last.parent.glob(f"{flow}_{position.branch}.*.snap")
+                for entry in snapshot_paths.branch_outputs(flow, position.branch)
             }
         except OSError as error:
             raise SnapshotError(f"cannot read history for {flow}: {error}") from error
@@ -449,12 +453,9 @@ class FlowRun:
         path = snapshot_paths.snapshot_path(
             self.env.name, self.output_position, self.branch
         )
-        if path.exists():
-            raise SnapshotError(f"refusing to overwrite output snapshot {path}")
-        save_snapshot(
+        save_output_snapshot(
             self.root,
             path,
-            checkpoint=path.stem,
             model_version=self.model_version,
             input_point=input_point,
             continuation=continuation,

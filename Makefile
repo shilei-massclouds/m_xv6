@@ -21,6 +21,6 @@ clean:
 	@make clean_snap
 
 clean_snap:
-	@find snapshots -type f \( -name '*.snap' -o -name 'records.json' -o -name '.records.*.tmp' -o -name '.*.snap.*.tmp' \) -delete
+	@find snapshots -type f \( -name '*.snap' -o -name '*.snap-body' -o -name 'index.json' -o -name 'records.json' -o -name '.snapshot.*.tmp' -o -name '.records.*.tmp' -o -name '.*.snap.*.tmp' \) -delete
 
 .PHONY: run test clean clean_snap

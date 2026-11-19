@@ -45,11 +45,11 @@ Signal 调用写成 `drive("target", "action", key=value)`，可直接调用或�
 
 设点严格针对 spec 的 Actions 源操作行，裸操作一行是一个原子操作。解析器为这些行附加源位置；方法入口/出口、Requires/Ensures、保护域进入/退出、解释器内部指令、`assert` 和 `pass` 不触发设点。Actions 中显式执行的同步原语调用属于裸操作，仍然设点。Python Origin 发出的根 Signal 不来自 Actions，不单独设点；根方法内部的 Actions 正常设点。
 
-初次 `FlowRun` 保存默认 GV 的初始 O 点 `<flow>_0.0.snap`，后续 O 从 1 开始。每个派生分支以候选快照为初始输入，I 和实际生成的 O 分别从 0 编号。`inputs/records.json` 的 `points` 保存名称、`base`、输入快照的相对路径、源位置、操作种类和原文、输入描述。派生分支首个 I 的 `base` 指向基准 I，其余 I 的 `base` 为 `null`。`spec_fingerprints` 保存涉及文件在解析时的 SHA-256。O 文件头的 `input_point` 记录来源 I，恢复分支中跨 I 点挂起的 `drive` 完成后仍指向原来的 I。
+初次 `FlowRun` 保存默认 GV 的初始 O 点 `<flow>_0.0.snap`，后续 O 从 1 开始。每个派生分支以候选快照为初始输入，I 和实际生成的 O 分别从 0 编号。`inputs/records.json` 的 `points` 保存名称、`base`、输入快照的相对路径、源位置、操作种类和原文、输入描述。派生分支首个 I 的 `base` 指向基准 I，其余 I 的 `base` 为 `null`。`spec_fingerprints` 保存涉及文件在解析时的 SHA-256。O 元数据的 `input_point` 记录来源 I，恢复分支中跨 I 点挂起的 `drive` 完成后仍指向原来的 I。
 
 drive 输入描述来源模型、目标、方法和实参；裸操作描述来源模型及当前局部绑定（排除 `self`、`env`）。编码中的 `gv` 路径相对于该 I 绑定的输入快照，支持属性、序列下标、字典键/值位置和绑定方法的所属对象；其他模型实例、容器和绑定方法使用 `objects` 表与 `local` 编号，保留别名和循环。枚举和方法记录可导入类型/函数名称。Env/CV 仅能作为 `environment` 引用，不展开状态；队列及不支持的值明确报错，GV 中含对象成员的集合也会拒绝。路径和 local 编号不代表跨 GV 快照的稳定身份。
 
-每条操作执行前记录 I，O 原子保存后推进输出计数。主入口使用 `buffer_input_records()`，同一 Flow 的多次 `FlowRun` 共用内存历史。结束时各写出一次 `records.json`，异常退出时也导出已记录的 I 点。批次期间文件可能尚未生成，强制终止可能丢失内存历史。单独使用 `FlowRun` 默认逐点原子写出 I 记录。输入记录描述操作输入，完整执行栈由 `break` O 点保存。
+每条操作执行前记录 I，O 保存成功后推进输出计数。主入口使用 `buffer_input_records()` 和 `deduplicate_outputs()`，内存中维护 I 点和逻辑 O 点索引。普通 O 点序列化一次，在内存计算 SHA-256，正文按摘要跨 Flow 共用，逻辑名称和来源 I 各自保留。候选和分支历史按逻辑 O 点枚举。退出时各 Flow 原子写出 `outputs/index.json` 和 `inputs/records.json`，异常退出也会导出已有记录。强制终止可能丢失尚未写出的索引和 I 点。单独使用 `FlowRun` 默认逐点原子保存。
 
 格式 2 的 `break` O 点在同一个对象图中保存 GV、Env、保护域、Frame、Signal 队列和 I/O 位置。格式 1 为普通 GV 快照。框架内部的 `resume_checkpoint` 仍从原分支最新断点续写。加载会检查模型版本、spec 指纹和该分支的 I/O 历史。普通 GV 加载器可以读取两种格式。
 

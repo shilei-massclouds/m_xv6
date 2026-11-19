@@ -8,6 +8,10 @@ import json
 import os
 import pickle
 import tempfile
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from io import BufferedRandom, BytesIO
 from pathlib import Path
@@ -22,6 +26,8 @@ FORMAT_VERSION = 1
 CONTINUATION_FORMAT_VERSION = 2
 _MAX_HEADER_BYTES = 64 * 1024
 _ROOT_ID = "snapshot_root"
+_INDEX_NAME = "index.json"
+_INDEX_VERSION = 1
 
 
 class SnapshotMetadata(TypedDict):
@@ -43,6 +49,99 @@ class SnapshotFormatError(SnapshotError):
 
 class SnapshotCompatibilityError(SnapshotError):
     """A snapshot's version or checkpoint does not match the caller."""
+
+
+@dataclass
+class _OutputBatch:
+    indexes: dict[Path, dict[str, Any]] = field(default_factory=dict)
+    dirty: set[Path] = field(default_factory=set)
+    checked_bodies: set[Path] = field(default_factory=set)
+
+
+_OUTPUT_BATCH: ContextVar[_OutputBatch | None] = ContextVar(
+    "snapshot_output_batch", default=None
+)
+
+
+@contextmanager
+def deduplicate_outputs() -> Iterator[None]:
+    """Store ordinary FlowRun outputs by digest and publish their logical names."""
+    if _OUTPUT_BATCH.get() is not None:
+        raise RuntimeError("output snapshot batches cannot be nested")
+    batch = _OutputBatch()
+    token = _OUTPUT_BATCH.set(batch)
+    try:
+        yield
+    finally:
+        _OUTPUT_BATCH.reset(token)
+        with ExitStack() as exports:
+            for index_path in batch.dirty:
+                exports.callback(_write_index, index_path, batch.indexes[index_path])
+
+
+def _write_atomic(path: Path, contents: bytes) -> None:
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=path.parent, prefix=".snapshot.", suffix=".tmp", delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(contents)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except OSError as error:
+        raise SnapshotError(f"cannot write {path}: {error}") from error
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _write_index(path: Path, entries: dict[str, Any]) -> None:
+    document = {"version": _INDEX_VERSION, "snapshots": entries}
+    _write_atomic(
+        path, (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode()
+    )
+
+
+def _index_entries(directory: Path) -> dict[str, Any]:
+    path = directory.resolve() / _INDEX_NAME
+    batch = _OUTPUT_BATCH.get()
+    if batch is not None and path in batch.indexes:
+        return batch.indexes[path]
+    try:
+        document = json.loads(path.read_bytes())
+    except FileNotFoundError:
+        entries = {}
+    except (ValueError, RecursionError) as error:
+        raise SnapshotFormatError(f"invalid output index {path}: {error}") from error
+    except OSError as error:
+        raise SnapshotError(f"cannot read output index {path}: {error}") from error
+    else:
+        if (
+            not isinstance(document, dict)
+            or type(document.get("version")) is not int
+            or document["version"] != _INDEX_VERSION
+            or not isinstance(document.get("snapshots"), dict)
+        ):
+            raise SnapshotFormatError(f"invalid output index {path}")
+        entries = document["snapshots"]
+        if any(
+            Path(name).name != name or not name.endswith(".snap") for name in entries
+        ):
+            raise SnapshotFormatError(f"invalid logical snapshot name in {path}")
+    if batch is not None:
+        batch.indexes[path] = entries
+    return entries
+
+
+def indexed_output_names(directory: Path) -> set[str]:
+    return set(_index_entries(directory))
+
+
+def _body_path(directory: Path, digest: str) -> Path:
+    # A FlowRun output directory is <snapshot root>/<flow>/outputs.
+    return directory.resolve().parents[1] / ".objects" / f"{digest}.snap-body"
 
 
 def _bind_method(function: Any, owner: object) -> MethodType:
@@ -163,6 +262,13 @@ def _read_header(stream: BinaryIO) -> SnapshotMetadata:
         metadata = json.loads(header.decode("utf-8"))
     except (ValueError, RecursionError) as exc:
         raise SnapshotFormatError(f"invalid UTF-8 JSON snapshot header: {exc}") from exc
+    metadata = _validate_metadata(metadata)
+    if stream.readline(2) != b"\n":
+        raise SnapshotFormatError("missing blank line before snapshot payload")
+    return metadata
+
+
+def _validate_metadata(metadata: Any) -> SnapshotMetadata:
     if not isinstance(metadata, dict):
         raise SnapshotFormatError("snapshot header must be a JSON object")
     for name in ("format_version", "model_version"):
@@ -184,9 +290,87 @@ def _read_header(stream: BinaryIO) -> SnapshotMetadata:
     digest = metadata["payload_sha256"]
     if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
         raise SnapshotFormatError("invalid snapshot payload checksum")
-    if stream.readline(2) != b"\n":
-        raise SnapshotFormatError("missing blank line before snapshot payload")
     return cast(SnapshotMetadata, metadata)
+
+
+def _new_metadata(
+    *,
+    checkpoint: str,
+    model_version: int,
+    input_point: str | None = None,
+    format_version: int,
+) -> SnapshotMetadata:
+    if not isinstance(checkpoint, str) or not checkpoint:
+        raise ValueError("checkpoint must be a nonempty string")
+    if input_point is not None and (
+        not isinstance(input_point, str) or not input_point
+    ):
+        raise ValueError("input_point must be a nonempty string")
+    metadata: SnapshotMetadata = {
+        "format_version": format_version,
+        "model_version": model_version,
+        "checkpoint": checkpoint,
+        "created_at": datetime.now(UTC).isoformat(),
+        "payload_sha256": "0" * 64,
+    }
+    if input_point is not None:
+        metadata["input_point"] = input_point
+    return metadata
+
+
+def save_output_snapshot(
+    root: object,
+    path: Path,
+    *,
+    model_version: int,
+    input_point: str | None,
+    continuation: object | None,
+) -> SnapshotMetadata:
+    """Save a FlowRun output without replacing an existing logical name."""
+    if path.exists() or path.name in _index_entries(path.parent):
+        raise SnapshotError(f"refusing to overwrite output snapshot {path}")
+    batch = _OUTPUT_BATCH.get()
+    if batch is None or continuation is not None:
+        return save_snapshot(
+            root,
+            path,
+            checkpoint=path.stem,
+            model_version=model_version,
+            input_point=input_point,
+            continuation=continuation,
+        )
+
+    metadata = _new_metadata(
+        checkpoint=path.stem,
+        model_version=model_version,
+        input_point=input_point,
+        format_version=FORMAT_VERSION,
+    )
+    try:
+        stream = BytesIO()
+        _SnapshotPickler(stream, root).dump(vars(root))
+        body = stream.getvalue()
+        digest = hashlib.sha256(body).hexdigest()
+        metadata["payload_sha256"] = digest
+        body_path = _body_path(path.parent, digest)
+        if body_path not in batch.checked_bodies:
+            body_path.parent.mkdir(exist_ok=True)
+            try:
+                previous = body_path.read_bytes()
+            except FileNotFoundError:
+                _write_atomic(body_path, body)
+            else:
+                if previous != body:
+                    raise SnapshotFormatError(
+                        f"snapshot body differs from its digest: {body_path}"
+                    )
+            batch.checked_bodies.add(body_path)
+        index_path = path.parent.resolve() / _INDEX_NAME
+        batch.indexes[index_path][path.name] = metadata
+        batch.dirty.add(index_path)
+    except Exception as error:
+        raise SnapshotError(f"cannot save snapshot {path}: {error}") from error
+    return metadata
 
 
 def save_snapshot(
@@ -203,24 +387,15 @@ def save_snapshot(
     The parent directory must exist. Root references use a persistent Pickle
     ID, while the attribute dictionary itself remains part of the object graph.
     """
-    if not isinstance(checkpoint, str) or not checkpoint:
-        raise ValueError("checkpoint must be a nonempty string")
-    if input_point is not None and (
-        not isinstance(input_point, str) or not input_point
-    ):
-        raise ValueError("input_point must be a nonempty string")
     path = Path(path)
-    metadata: SnapshotMetadata = {
-        "format_version": (
-            FORMAT_VERSION if continuation is None else CONTINUATION_FORMAT_VERSION
-        ),
-        "model_version": model_version,
-        "checkpoint": checkpoint,
-        "created_at": datetime.now(UTC).isoformat(),
-        "payload_sha256": "0" * 64,
-    }
-    if input_point is not None:
-        metadata["input_point"] = input_point
+    metadata = _new_metadata(
+        checkpoint=checkpoint,
+        model_version=model_version,
+        input_point=input_point,
+        format_version=FORMAT_VERSION
+        if continuation is None
+        else CONTINUATION_FORMAT_VERSION,
+    )
     temporary_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -272,8 +447,25 @@ def read_snapshot(
     """Read a trusted snapshot without installing its state on root."""
     path = Path(path)
     try:
-        with path.open("rb") as stream:
-            metadata = _read_header(stream)
+        with ExitStack() as files:
+            try:
+                stream = files.enter_context(path.open("rb"))
+            except FileNotFoundError:
+                if path.parent.name != "outputs":
+                    raise
+                entry = _index_entries(path.parent).get(path.name)
+                if entry is None:
+                    raise
+                metadata = _validate_metadata(entry)
+                if (
+                    metadata["format_version"] != FORMAT_VERSION
+                    or metadata["checkpoint"] != path.stem
+                ):
+                    raise SnapshotFormatError("invalid indexed output metadata")
+                body = _body_path(path.parent, metadata["payload_sha256"])
+                stream = files.enter_context(body.open("rb"))
+            else:
+                metadata = _read_header(stream)
             if metadata["format_version"] not in (
                 FORMAT_VERSION,
                 CONTINUATION_FORMAT_VERSION,

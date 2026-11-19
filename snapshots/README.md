@@ -1,8 +1,8 @@
 # I/O 记录与恢复
 
-BP、AP 各自使用 `snapshots/<flow>/inputs/records.json` 保存 I 点，使用 `snapshots/<flow>/outputs/` 保存快照。两个 Flow 的分支 0 分别从默认 GV 和 Env 开始。
+BP、AP 各自使用 `snapshots/<flow>/inputs/records.json` 保存 I 点，使用 `snapshots/<flow>/outputs/` 保存 O 点索引和断点快照。两个 Flow 的分支 0 分别从默认 GV 和 Env 开始。
 
-`<flow>_0.0.snap` 是初始 GV 的 O 点。每个分支独立编号，派生分支的首个 I 和实际生成的首个 O 均从 0 开始。O 文件头的可选 `input_point` 关联其来源 I，初始 O 没有来源。每个 I 的 `input_snapshot` 是相对于 snapshots 根目录的路径。
+`<flow>_0.0.snap` 是初始 GV 的逻辑 O 点。每个分支独立编号，派生分支的首个 I 和实际生成的首个 O 均从 0 开始。O 元数据的可选 `input_point` 关联其来源 I，初始 O 没有来源。每个 I 的 `input_snapshot` 是相对于 snapshots 根目录的逻辑路径。
 
 设点针对 spec Actions 内的操作行。裸操作成功、`emit` 入队、`drive` 完成队列处理并交付结果时各自产生 O。方法边界、保护域声明、内部指令、assert 和 pass 不额外设点。
 
@@ -10,7 +10,7 @@ BP、AP 各自使用 `snapshots/<flow>/inputs/records.json` 保存 I 点，使�
 
 `records.json` 包含记录格式版本、模型版本、涉及 spec 的指纹，以及 I 的名称、base、输入快照、源位置和动作输入。AP 的派生分支首个 I 以 `base` 指向分支 0 的 `ap_0.0` 或 `ap_0.3`，`input_snapshot` 指向该分支使用的 BP 候选 O。两个基准 I 分别来自默认启动和从第一个 `break` 续跑。
 
-主入口在内存中保留 BP、AP 的 I 点历史，退出前分别原子写出 `records.json`。可处理的错误也会触发导出。推导期间和强制终止后，可能只有 O 点文件。
+主入口把普通 O 正文存到 `.objects/<SHA-256>.snap-body`，相同正文只保存一次。`outputs/index.json` 将逻辑 `.snap` 文件名映射到包含摘要和来源 I 点的元数据，加载器可直接使用逻辑路径。退出前按 Flow 写出索引和 `records.json`。推导期间索引驻留在内存，强制终止时可能尚未发布。
 
 GV 模型版本保持 9，类型和回调仍注册于 `flows.model_specs`。通用加载器继续支持没有 `input_point` 字段的版本 9 快照；旧的平铺目录和按方法退出编号的文件不能作为新 I/O 历史使用，应清理后重新生成。
 

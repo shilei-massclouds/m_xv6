@@ -21,7 +21,7 @@ I/O 点只由 spec 的 Actions 操作行触发。裸操作执行前记录 I 点�
 
 `TaskLocalEnv` 必须提供当前 Flow 的 `name`，只保存 CV、调用深度和 Signal 队列。`FlowRun(gv, env, model_version)` 独立维护当前分支、I/O 计数器、I 点记录及最近的输出；不再有 Env 候选列表、`handled` 或 `range`。执行 spec 必须处于对应 Env 的活动 `FlowRun` 中；一个上下文可执行多个根 Signal，但不能嵌套或复用。
 
-每个 Flow 在 `snapshots/<flow>/inputs/records.json` 中保存 I 点记录，在 `snapshots/<flow>/outputs/` 中保存快照。I/O 点分别以 `<flow>_<分支号>.<序号>` 独立编号。分支 0 的初始 O 保存默认 GV，其余分支以候选 O 为初始输入，首个完成操作的 O 从 0 编号。O 文件头的可选字段 `input_point` 指向来源 I。路径固定相对于仓库根目录。
+每个 Flow 在 `snapshots/<flow>/inputs/records.json` 中保存 I 点记录，在 `snapshots/<flow>/outputs/` 中保存 O 点索引和 `break` 文件。I/O 点分别以 `<flow>_<分支号>.<序号>` 独立编号。分支 0 的初始 O 保存默认 GV，其余分支以候选 O 为初始输入，首个完成操作的 O 从 0 编号。O 点的元数据字段 `input_point` 指向来源 I。路径固定相对于仓库根目录。
 
 派生分支首个 I 的 `base` 是基准 I 点名，`input_snapshot` 是 BP 候选快照路径。其他 I 点的 `base` 为 `null`。基准 I 点的运行状态暂存在本次推导的内存中，`break` O 点继续持久化 Env、Frame 和 Signal 队列。详见 [framework/SPEC.md](framework/SPEC.md)。
 
@@ -72,7 +72,9 @@ metadata = load_snapshot(
 
 快照保存 `gv` 的全部实例属性，包括动态属性、容器、枚举、绑定方法、共享引用和循环引用。绑定方法保留其函数和所属对象，函数需符合标准 Pickle 的可导入要求。加载时保留当前 `gv` 的身份，并将快照中的根引用绑定到它。外部代码持有的旧内部对象引用仍指向旧对象，需要重新通过 `gv` 取值。普通快照采用格式 1，`break` 检查点采用格式 2 并同时保存执行环境。通用 `load_snapshot` 可从两种格式提取 GV。
 
-每个文件由固定标识行 `M_XV6_SNAPSHOT`、一行 UTF-8 JSON 文件头、一个空行和未压缩的 Pickle 二进制正文组成。文件头包含 `format_version`、`model_version`、`checkpoint`、UTC 时间 `created_at`、正文校验和 `payload_sha256`，以及可选的来源 `input_point`。每份快照独立保存在磁盘，不建立常驻内存快照库。
+独立快照由标识行 `M_XV6_SNAPSHOT`、一行 UTF-8 JSON 文件头、一个空行和 Pickle 二进制正文组成。文件头包含格式与模型版本、快照点、UTC 时间、正文 SHA-256 和可选的来源 I 点。
+
+主入口为普通 O 点计算正文 SHA-256，正文相同的 O 点共用 `snapshots/.objects/<摘要>.snap-body`。每个 Flow 的 `outputs/index.json` 保存逻辑 `.snap` 名称及其各自的元数据，推导退出时随 I 点记录一起导出。仍可把原来的 `.snap` 路径传给 `load_snapshot`，加载器会解析索引并验证共享正文。枚举 O 点时用 `snapshot_paths.branch_outputs` 获取逻辑路径。`break` 检查点和单独调用 `save_snapshot` 保存的快照采用独立文件。
 
 保存时先写同目录临时文件，完成校验和与文件同步后原子替换目标文件。保存失败不会覆盖原文件；加载会先验证文件头、版本、快照点及正文校验和，完整反序列化成功后再替换实例状态。缺失文件、格式损坏和 I/O 失败抛出 `SnapshotError`；格式损坏和版本/快照点不匹配分别使用其子类 `SnapshotFormatError`、`SnapshotCompatibilityError`，可从 `framework.snapshot` 导入。
 

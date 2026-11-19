@@ -21,6 +21,7 @@ from framework.snapshot import (
     SnapshotCompatibilityError,
     SnapshotError,
     SnapshotFormatError,
+    deduplicate_outputs,
     load_snapshot,
     read_snapshot,
     save_snapshot,
@@ -716,7 +717,10 @@ def test_fork_both_entry_points_with_independent_candidate_gvs(
 
     monkeypatch.setattr(flow_run.os, "replace", track_record_publish)
     anchors: dict[str, bytes] = {}
-    with buffer_input_records() if buffered else nullcontext():
+    with (
+        buffer_input_records() if buffered else nullcontext(),
+        deduplicate_outputs() if buffered else nullcontext(),
+    ):
         with (
             pytest.raises(FlowPaused) as initial,
             FlowRun(

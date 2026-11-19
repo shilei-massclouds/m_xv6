@@ -1,5 +1,6 @@
 """Repository-local paths for spec operation inputs and outputs."""
 
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 SNAPSHOT_DIR = Path(__file__).resolve().parents[1] / "snapshots"
@@ -26,8 +27,15 @@ def snapshot_path(flow: str, position: int, branch: int = 0) -> Path:
 
 
 def branch_outputs(flow: str, branch: int) -> list[Path]:
+    from framework.snapshot import indexed_output_names
+
     directory = flow_directory(flow) / "outputs"
+    pattern = f"{flow}_{branch}.*.snap"
+    names = {path.name for path in directory.glob(pattern)}
+    names.update(
+        name for name in indexed_output_names(directory) if fnmatchcase(name, pattern)
+    )
     return sorted(
-        directory.glob(f"{flow}_{branch}.*.snap"),
+        (directory / name for name in names),
         key=lambda path: int(path.stem.rsplit(".", 1)[1]),
     )
