@@ -322,11 +322,14 @@ class StepPoint(Exception):
 class FlowPaused(Exception):
     """Transfer a saved continuation to the Python entry point."""
 
-    def __init__(self, point: str, state: Enum, checkpoint: Path):
-        super().__init__(point, state, checkpoint)
+    def __init__(
+        self, point: str, state: Enum, checkpoint: Path, site: tuple[Path, int]
+    ):
+        super().__init__(point, state, checkpoint, site)
         self.point = point
         self.state = state
         self.checkpoint = checkpoint
+        self.site = site
 
 
 def exit_from(point: str, state: str):

@@ -53,6 +53,8 @@ drive 输入描述来源模型、目标、方法和实参；裸操作描述来�
 
 格式 2 的 `break` O 点在同一个对象图中保存 GV、Env、保护域、Frame、Signal 队列和 I/O 位置。格式 1 为普通 GV 快照。断点包索引为每个逻辑 O 点记录正文偏移和长度，续写保留已发布检查点的偏移。框架内部的 `resume_checkpoint` 仍从原分支最新断点续写。加载会检查正文摘要、模型版本、spec 指纹和该分支的 I/O 历史。普通 GV 加载器可以读取两种格式及独立文件。
 
-`FlowRun` 和 `resume_checkpoint` 的 `capture_input` 回调可以暂存首个 I 点。若该 I 已形成 Signal，暂存包括已求值的实参。`fork_input` 为每份候选 GV 独立恢复 AP 的 Env、Frame、Signal 和保护域，并按 GV 属性路径重新绑定引用。当前候选替换支持有属性路径的对象，按列表或字典位置访问的成员仅用于 I 点记录。候选缺少对应成员或类型不匹配时报告错误。基准 I 点状态在当前进程内复用。
+`FlowRun`、`resume_checkpoint` 和 `fork_input` 的 `capture_input` 回调默认暂存首个 I 点，设 `capture_all_inputs=True` 后暂存每个 I 点。若该 I 已形成 Signal，暂存包括已求值的实参。`fork_input` 为每份候选 GV 独立恢复目标线路的 Env、Frame、Signal 和保护域，并按 GV 属性路径重新绑定引用。只通过容器位置找到的对象随执行状态冻结，以免加载另一份 GV 时把已求值的参数换成同一下标的其他对象。候选缺少需重新绑定的成员或类型不匹配时报告错误。基准 I 点状态在当前进程内复用。
+
+`derive_flows` 接收一组 Origin，按阶展开有方向的组合。每条线路从 `start()` 或分叉 I 点出发；遇到 `break` 时续跑，每条线路在同一源代码位置最多续跑一次。派生分支会应用尚未参与该线路的 Flow 的一阶 O 快照，并保留自己新产生的 I 点供下一阶使用。运行错误直接向外传播，已产生的记录由批次上下文保存。
 
 验证：`python3 -m pytest -q tests/test_spec.py`；完整检查：`make test`。测试仅保障 framework，`ProcTable.spec` 作为首个语言验证输入。

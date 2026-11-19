@@ -18,4 +18,4 @@ class ApInitOrigin(Origin):
         Preemption().disable(self.env.cv)
         RemoteCpus().enable(self.env.cv)
 
-        self.drive(self.env, "ap_init_flow", "start")
+        self.drive(self.env, "ap_init_flow", "_start")

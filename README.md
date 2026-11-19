@@ -2,7 +2,7 @@
 
 BP、AP 和 InitProc Flow 均由 spec 描述并解释执行，入口分别为 `flows/BpInitFlow.spec`、`flows/ApInitFlow.spec` 和 `flows/InitProcFlow.spec`，依赖对象也由各目录中的 spec 定义。`flows/model_specs.py` 统一注册模型，`global_vars.py` 通过 `new_model(...)` 创建 Flow 及其依赖对象。语法、执行语义和验证方式见 [framework/SPEC.md](framework/SPEC.md)。
 
-当前依次运行 BP、AP 推导：
+当前入口 `main.py` 将 `[BpInitOrigin(), ApInitOrigin()]` 传给通用推导器：
 
 ```sh
 python3 main.py
@@ -10,10 +10,11 @@ python3 main.py
 
 执行 `make` 或 `make run` 会先清理生成数据，再按以下顺序推导。
 
-1. BP 从默认 GV、Env 开始，生成候选 O 快照。
-2. AP 从默认 GV、Env 开始，在首个 I 点 `ap_0.0` 暂存执行状态，并在等待通知时暂停为 `BUSYCHECK`。
-3. AP 从该 `break` O 点恢复，在 `emit("self", "_wait")` 的 I 点 `ap_0.3` 暂存第二份执行状态。默认 GV 中的通知仍为假，AP 再次暂停。
-4. 对两个基准 I 点分别加载每份 BP 候选 GV，保留 AP 的 Env、Signal 和执行位置，逐一推导派生分支。当前 64 份候选在每个起点各产生 51 个 `BUSYCHECK`、6 个 `SWITCHED`、7 个 `WFI`。
+1. 一阶：每个 Origin 从默认 GV 和自己的 Env 启动。遇到 `break` 时从对应 O 点续跑，发现后续的 I/O 点；同一条线路再次到达同一处 `break` 时保留暂停状态。
+2. 二阶：对每一对有方向的 Flow，将来源 Flow 的所有一阶 O 点快照分别加载到目标 Flow 的每个一阶 I 点。BP → AP 和 AP → BP 分开推导。
+3. 三阶及以上：对上一阶每条线路新产生的每个 I 点，依次应用尚未参与该线路的各个 Flow 的一阶 O 点快照，最多到输入 Flow 数量对应的阶数。
+
+每次分叉替换整个 GV，保留目标线路的 Env、Signal、局部值和已选契约分支。遇到语法错误、契约失败或其他执行错误时立即中止，并报告触发错误的位置。当前 BP → AP 的 320 个分支可执行；AP → BP 在把 AP 的初始 GV 应用于 `bp_0.60` 时发现 BP 已选中的取队首操作遇到了空队列，推导以 `IndexError` 中止。
 
 I/O 点只由 spec 的 Actions 操作行触发。裸操作执行前记录 I 点，成功后保存 O 点。`drive` 和 `emit` 在 Signal 参数求值完成后记录 I 点，分别在队列处理完毕并交付结果、以及 Signal 入队后生成 O 点。`break` 通过所属 CpuFlow 实例最内层活动契约的 Ensures 后，保存可恢复的 O 点。内部 Actions 操作各自设点。
 
@@ -23,13 +24,13 @@ I/O 点只由 spec 的 Actions 操作行触发。裸操作执行前记录 I 点�
 
 每个 Flow 在 `snapshots/<flow>/inputs/records.json` 中保存 I 点记录，在 `snapshots/<flow>/outputs/` 中保存 O 点索引和断点包。I/O 点分别以 `<flow>_<分支号>.<序号>` 独立编号。分支 0 的初始 O 保存默认 GV，其余分支以候选 O 为初始输入，首个完成操作的 O 从 0 编号。O 点的元数据字段 `input_point` 指向来源 I。路径固定相对于仓库根目录。
 
-派生分支首个 I 的 `base` 是基准 I 点名，`input_snapshot` 是 BP 候选快照路径。其他 I 点的 `base` 为 `null`。基准 I 点的运行状态暂存在本次推导的内存中，`break` O 点继续持久化 Env、Frame 和 Signal 队列。详见 [framework/SPEC.md](framework/SPEC.md)。
+派生分支首个 I 的 `base` 是被分叉的 I 点名，`input_snapshot` 是来源 Flow 的候选快照路径。其他 I 点的 `base` 为 `null`。待分叉 I 点的运行状态暂存在本次推导的内存中，`break` O 点继续持久化 Env、Frame 和 Signal 队列。详见 [framework/SPEC.md](framework/SPEC.md)。
 
 主入口的 I 点记录在内存中逐条追加，分支和续跑共用这份历史。推导结束或因可被程序处理的错误退出时，每个 Flow 原子写出一次 `records.json`。强制终止可能丢失尚未写盘的 I 点。单独调用 `FlowRun` 时仍逐点写盘。
 
 操作失败、契约失败或 StepPoint 不生成对应 O 点；已经成功的内部操作输出保留。只有 I 点记录成功后才执行操作。O 保存失败时保留原编号和已有文件。异常后清理保护域和 Frame。再次首轮运行前可用 `make clean_snap` 清理生成记录、快照和临时文件。
 
-InitProc 已有 spec，仍不接入 `main.py`。如需手动运行，在已准备好的 GV 上创建 `InitProcOrigin(source="bp")` 或 `InitProcOrigin(source="ap")`，并在 `with FlowRun(gv, origin.env, MODEL_VERSION):` 中调用 `origin.start()`。`source` 仅保留来源标记，不加载快照；`FlowRun` 本身也不重置 GV，独立初始化由 `main.py` 负责。
+InitProc 的 spec 保留，目前不作为独立 Flow 参与推导。`FlowRun` 本身不重置 GV；一阶推导由 `derive_flows` 在每个 Origin 启动前恢复默认 GV。
 
 `GlobalVars.initproc` 是初始为 `None` 的可选进程引用，不预先创建进程；模型暂时没有 `childproc` 字段。BP 的 `userinit` 调用 `ProcTable._alloc` 创建进程、分配资源，并在其进入 `RUNNABLE` 状态后通过 `put_runnable(task=proc)` 入队。首次分配会设置 `gv.initproc`，后续分配创建独立进程，并保留该引用。
 
@@ -108,7 +109,7 @@ def adjust(self, amount):
 
 入口没有成立的分支，或选中出口行没有成立的条件时，立即抛出 `ContractViolation`，未捕获时程序终止。错误消息报告调用处的文件、行号、函数/方法名和 `requires`/`ensures` 阶段，也可以通过异常的 `filename`、`lineno`、`function`、`phase` 属性读取。出口失败还报告从 0 开始的入口分支索引 `branch_index`。`python -O` 下仍然检查。
 
-Python 契约函数的入口选择保存在当前 Python 调用帧的保留局部变量 `__m_xv6_contract_state__` 中，随调用结束释放；直接调用、嵌套、递归及交错恢复的生成器各自独立。Python 调用者在方法入口和正常出口显式放置检查，框架不自动包装方法或补跑遗漏的出口检查。spec 契约由解释器在对应 Frame 中选择入口并检查出口，详见 [framework/SPEC.md](framework/SPEC.md)。BP 的 `_start` 和 AP 的 `start` 检查调度器从 `RUNNING` 到 `SWITCHED` 或 `WFI`，InitProc 检查内核态到用户态，`ProcTable._pick_runnable` 和 `_put_runnable` 按入口队列为空或非空的分支检查出口。
+Python 契约函数的入口选择保存在当前 Python 调用帧的保留局部变量 `__m_xv6_contract_state__` 中，随调用结束释放；直接调用、嵌套、递归及交错恢复的生成器各自独立。Python 调用者在方法入口和正常出口显式放置检查，框架不自动包装方法或补跑遗漏的出口检查。spec 契约由解释器在对应 Frame 中选择入口并检查出口，详见 [framework/SPEC.md](framework/SPEC.md)。BP 和 AP 的 `_start` 检查 Flow 的状态，InitProc 检查内核态到用户态，`ProcTable._pick_runnable` 和 `_put_runnable` 按入口队列为空或非空的分支检查出口。
 
 契约函数不保存、加载或回滚状态。契约失败会终止本次调用，调用它的 spec drive 行不生成 O 点，之前成功操作的快照保留。
 

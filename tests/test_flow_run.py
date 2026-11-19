@@ -13,6 +13,7 @@ import pytest
 
 from framework import flow_run, snapshot_paths
 from framework.contracts import ContractViolation
+from framework.derivation import derive_flows
 from framework.engine import FlowPaused, StepPoint, System, TaskLocalEnv
 from framework.flow_run import FlowRun, buffer_input_records, require_run
 from framework.input_encoding import InputEncodingError
@@ -44,6 +45,15 @@ class NativeTarget(System):
 
     def release(self, env, action):
         self.releases += 1
+
+
+@dataclass
+class DerivationOrigin(System):
+    env: TaskLocalEnv
+    delta: int
+
+    def start(self) -> None:
+        self.drive(self.env, "worker", "start", delta=self.delta)
 
 
 @dataclass
@@ -805,6 +815,181 @@ def test_fork_reuses_prepared_signal_and_selected_contract(root, tmp_path):
     with pytest.raises(SnapshotCompatibilityError, match="incompatible type.*worker"):
         fork_input(root, "example_0.0", anchors["example_0.0"], incompatible, 1)
     assert points() == before
+
+
+def test_fork_keeps_prepared_argument_from_old_gv_container(root, tmp_path):
+    model(
+        root,
+        tmp_path,
+        """
+        Prop table: list[System]
+        Prop result: int = 0
+        Def start():
+            Actions:
+                self.result = drive("self", "read", item=self.table[0])
+        Def read(item) -> result:
+            Actions:
+                result = item.releases
+        """,
+    )
+    candidate = snapshot_paths.snapshot_path("candidate", 0)
+    candidate.parent.mkdir(parents=True)
+    root.worker.table = [NativeTarget(releases=20)]
+    save_snapshot(root, candidate, checkpoint=candidate.stem, model_version=1)
+    root.worker.table = [NativeTarget(releases=7)]
+
+    inputs: dict[str, bytes] = {}
+    with FlowRun(
+        root, TaskLocalEnv(name="example"), 1, capture_input=inputs.__setitem__
+    ) as run:
+        System().drive(run.env, "worker", "start")
+    fork_input(root, "example_0.0", inputs["example_0.0"], candidate, 1)
+
+    assert root.worker.result == 7
+    assert root.worker.table[0].releases == 20
+
+
+def test_derivation_combines_every_i_point_in_order(root, tmp_path):
+    model(
+        root,
+        tmp_path,
+        """
+        Prop value: int = 0
+        Def start(delta):
+            Actions:
+                loaded = self.value
+                self.value = loaded + delta
+        """,
+    )
+    worker = type(root.worker)
+
+    def reset():
+        root.worker = worker()
+
+    deltas = {"alpha": 2, "beta": 3, "gamma": 5}
+    origins = [
+        DerivationOrigin(TaskLocalEnv(name), delta) for name, delta in deltas.items()
+    ]
+    derive_flows(origins, root=root, reset=reset, model_version=1)
+
+    def candidate(flow, index):
+        return f"{flow}/outputs/{flow}_0.{index}.snap"
+
+    for target, delta in deltas.items():
+        sources = [name for name in deltas if name != target]
+        baseline = {f"{target}_0.{index}" for index in range(2)}
+        records = points(target)
+        entries = [record for record in records if record["base"] is not None]
+        second = [entry for entry in entries if entry["base"] in baseline]
+        third = [entry for entry in entries if entry["base"] not in baseline]
+        assert [(output(i, target)[0].worker.value) for i in range(3)] == [0, 0, delta]
+        assert len(second) == 12
+        assert {(entry["base"], entry["input_snapshot"]) for entry in second} == {
+            (base, candidate(source, index))
+            for base in baseline
+            for source in sources
+            for index in range(3)
+        }
+        expected = set()
+        for entry in second:
+            source = entry["input_snapshot"].split("/")[0]
+            other = next(name for name in sources if name != source)
+            branch = entry["name"].rsplit(".", 1)[0]
+            expected.update(
+                (record["name"], candidate(other, index))
+                for record in records
+                if record["name"].startswith(f"{branch}.")
+                for index in range(3)
+            )
+        assert len(third) == 54
+        assert {(entry["base"], entry["input_snapshot"]) for entry in third} == expected
+
+        # Loading a third GV still preserves the value computed by the second line.
+        source, other = sources
+        seeded = next(
+            entry
+            for entry in second
+            if entry["base"] == f"{target}_0.0"
+            and entry["input_snapshot"] == candidate(source, 2)
+        )
+        late = seeded["name"].rsplit(".", 1)[0] + ".1"
+        combined = next(
+            entry
+            for entry in third
+            if entry["base"] == late and entry["input_snapshot"] == candidate(other, 0)
+        )
+        branch_number = int(combined["name"].rsplit("_", 1)[1].split(".")[0])
+        assert (
+            output(0, target, branch_number)[0].worker.value == delta + deltas[source]
+        )
+
+
+@pytest.mark.parametrize("phase", ["requires", "ensures"])
+def test_derivation_aborts_at_first_contract_failure(root, tmp_path, phase):
+    condition = "delta == 1 or self.value == 0"
+    contract = f"    {phase.title()}:\n        {condition}\n"
+    actions = "    Actions:\n        pass\n"
+    model(
+        root,
+        tmp_path,
+        "Prop value: int = 0\n"
+        "Def start(delta):\n"
+        "    Actions:\n"
+        '        drive("self", "check", delta=delta)\n'
+        "        self.value = delta\n"
+        "Def check(delta):\n"
+        + (contract + actions if phase == "requires" else actions + contract),
+    )
+    worker = type(root.worker)
+
+    def reset():
+        root.worker = worker()
+
+    origins = [
+        DerivationOrigin(TaskLocalEnv("source"), 1),
+        DerivationOrigin(TaskLocalEnv("target"), 2),
+    ]
+    with pytest.raises(ContractViolation) as failure:
+        derive_flows(origins, root=root, reset=reset, model_version=1)
+
+    assert failure.value.phase == phase
+    entries = [point for point in points("target") if point["base"] is not None]
+    assert [point["base"] for point in entries] == ["target_0.0"] * 3
+    assert entries[-1]["input_snapshot"] == "source/outputs/source_0.2.snap"
+    assert snapshot_paths.branch_outputs("target", 3) == []
+    assert all(point["base"] is None for point in points("source"))
+
+
+def test_derivation_resumes_each_break_site_once_per_line(root, tmp_path):
+    cpu_model(
+        root,
+        tmp_path,
+        """
+        Def start(delta):
+            Actions:
+                break(CpuFlowState.BUSYCHECK)
+                self.result = delta
+                drive("smp_started", "wait")
+        """,
+    )
+    worker = type(root.worker)
+
+    def reset():
+        root.worker = worker()
+
+    derive_flows(
+        [DerivationOrigin(TaskLocalEnv("example"), 9)],
+        root=root,
+        reset=reset,
+        model_version=1,
+    )
+
+    records = points()
+    breaks = [record for record in records if record["operation"]["kind"] == "break"]
+    assert len(breaks) == 3
+    first, wait, repeated = breaks
+    assert first["location"] != wait["location"] == repeated["location"]
+    assert root.worker.result == 9
 
 
 def test_buffered_records_publish_on_contract_failure(root, tmp_path):

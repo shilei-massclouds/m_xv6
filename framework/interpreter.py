@@ -372,7 +372,8 @@ class Interpreter:
         if (capture := run.capture_input) is not None:
             if not self.can_pause:
                 raise SpecError("capturing an I point requires a resumable spec stack")
-            run.capture_input = None
+            if not run.capture_all_inputs:
+                run.capture_input = None
             saved = InputState(
                 self.owner,
                 env,
@@ -388,7 +389,9 @@ class Interpreter:
         if signal is None:
             node = instruction.node
             if operation == "break":
-                self._break(run, frame, point, node.value.args[0])
+                self._break(
+                    run, frame, point, node.value.args[0], instruction.site.line
+                )
             self._statement(frame, node)
             run.complete(point)
         else:
@@ -472,7 +475,7 @@ class Interpreter:
         ]
 
     def _break(
-        self, run: FlowRun, frame: Frame, point: str, expression: ast.expr
+        self, run: FlowRun, frame: Frame, point: str, expression: ast.expr, line: int
     ) -> None:
         owner = self.owner
         if owner is None or not self.can_pause:
@@ -499,7 +502,7 @@ class Interpreter:
             history=run.position_after_pause(point),
         )
         path = run.complete(point, continuation=continuation)
-        raise FlowPaused(point, state, path)
+        raise FlowPaused(point, state, path, (frame.specification.path, line))
 
     def _restore(self, saved: Continuation | InputState) -> None:
         env = saved.env
@@ -644,6 +647,7 @@ def resume_checkpoint(
     model_version: int,
     *,
     capture_input: CaptureInput | None = None,
+    capture_all_inputs: bool = False,
 ) -> Any:
     """Continue from the instruction after the latest saved break."""
     Interpreter._check_root(root)
@@ -659,12 +663,20 @@ def resume_checkpoint(
         model_version,
         history=(path, saved.history, point),
         capture_input=capture_input,
+        capture_all_inputs=capture_all_inputs,
     )
     return _continue(run, state, saved)
 
 
 def fork_input(
-    root: object, base: str, frozen: bytes, candidate: Path, model_version: int
+    root: object,
+    base: str,
+    frozen: bytes,
+    candidate: Path,
+    model_version: int,
+    *,
+    capture_input: CaptureInput | None = None,
+    capture_all_inputs: bool = False,
 ) -> Any:
     """Run a new branch from an I point using a candidate O point's GV."""
     Interpreter._check_root(root)
@@ -675,6 +687,11 @@ def fork_input(
     if not isinstance(saved, InputState) or saved.point != base:
         raise SnapshotCompatibilityError("captured I point does not match its base")
     run = FlowRun(
-        root, saved.env, model_version, fork=Fork(base, candidate, saved.pending)
+        root,
+        saved.env,
+        model_version,
+        fork=Fork(base, candidate, saved.pending),
+        capture_input=capture_input,
+        capture_all_inputs=capture_all_inputs,
     )
     return _continue(run, state, saved)

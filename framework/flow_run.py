@@ -167,6 +167,7 @@ class FlowRun:
         history: tuple[Path, RunPosition, str] | None = None,
         fork: Fork | None = None,
         capture_input: CaptureInput | None = None,
+        capture_all_inputs: bool = False,
     ):
         if history is not None and fork is not None:
             raise ValueError("resume and fork are separate entry points")
@@ -188,6 +189,7 @@ class FlowRun:
         self._history = history
         self.fork = fork
         self.capture_input = capture_input
+        self.capture_all_inputs = capture_all_inputs
         self._directory_fd: int | None = None
         self._buffered: _BufferedHistory | None = None
 

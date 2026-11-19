@@ -1,7 +1,7 @@
 Parent CpuFlow
 Prop hartid: int = 1
 
-Def start():
+Def _start():
     Requires:
         self.state is CpuFlowState.RUNNING
     Actions:

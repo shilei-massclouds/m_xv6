@@ -6,9 +6,9 @@ BP、AP 各自使用 `snapshots/<flow>/inputs/records.json` 保存 I 点，使�
 
 设点针对 spec Actions 内的操作行。裸操作成功、`emit` 入队、`drive` 完成队列处理并交付结果时各自产生 O。方法边界、保护域声明、内部指令、assert 和 pass 不额外设点。
 
-独立 AP 在等待启动通知时以 `BUSYCHECK` 暂停，首轮产生 3 个 I 点和 2 份 O 快照，其中 `ap_0.1.snap` 是可恢复的 `break` O 点。可恢复快照采用格式 2，把 Env、Frame 和 Signal 队列与 GV 一起保存。普通 O 点采用格式 1，仅保存 GV。
+独立 AP 在等待启动通知时以 `BUSYCHECK` 暂停，`ap_0.1.snap` 是第一个可恢复的 `break` O 点。主入口从该点续跑，发现下一批 I/O 点，直到再次到达同一处 `break`。可恢复快照采用格式 2，把 Env、Frame 和 Signal 队列与 GV 一起保存。普通 O 点采用格式 1，仅保存 GV。
 
-`records.json` 包含记录格式版本、模型版本、涉及 spec 的指纹，以及 I 的名称、base、输入快照、源位置和动作输入。AP 的派生分支首个 I 以 `base` 指向分支 0 的 `ap_0.0` 或 `ap_0.3`，`input_snapshot` 指向该分支使用的 BP 候选 O。两个基准 I 分别来自默认启动和从第一个 `break` 续跑。
+`records.json` 包含记录格式版本、模型版本、涉及 spec 的指纹，以及 I 的名称、base、输入快照、源位置和动作输入。派生分支首个 I 的 `base` 指向目标 Flow 中被分叉的 I 点，可能位于分支 0 或上一阶派生分支。`input_snapshot` 指向该分支使用的来源 Flow 候选 O。
 
 主入口把普通 O 正文存到 `.objects/<SHA-256>.snap-body`，相同正文只保存一次。`break` 正文按 Flow 合并到 `outputs/breaks.pack`。`outputs/index.json` 将逻辑 `.snap` 文件名映射到摘要、来源 I 点和断点在包中的位置，加载器可直接使用逻辑路径。推导期间的断点和索引在内存中，退出时按断点包、索引、`records.json` 的顺序发布。强制终止时可能丢失尚未发布的数据。
 

@@ -253,12 +253,10 @@ class _InputPickler(_SnapshotPickler):
         if obj is self.root:
             return _ROOT_ID
         path = self.references.gv_path(obj)
-        if path is None:
+        if path is None or any("attribute" not in step for step in path):
+            # A container position describes the old GV, not the identity of
+            # a Signal argument in the candidate. Keep that argument frozen.
             return None
-        if any("attribute" not in step for step in path):
-            raise SnapshotCompatibilityError(
-                f"cannot bind an I point's GV reference by container position: {path}"
-            )
         return (
             "gv_member",
             tuple(step["attribute"] for step in path),
