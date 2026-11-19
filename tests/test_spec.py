@@ -321,6 +321,14 @@ def test_unsupported_syntax_reports_file(root: SpecRoot, tmp_path: Path, source:
         ("result = 1; result += 2", "one operation per physical line"),
         ("with GuardSpinLock(env.cv, self): pass", "one operation per physical line"),
         (
+            "with GuardSpinLock(env.cv, self):\n    pass",
+            "with requires exactly one drive",
+        ),
+        (
+            'with GuardSpinLock(env.cv, self):\n    drive("self", "_value")\n    result = 1',
+            "with requires exactly one drive",
+        ),
+        (
             "with GuardSpinLock(\n    env.cv, self\n):\n    pass",
             "single physical line",
         ),
@@ -336,6 +344,22 @@ def test_action_syntax_rejects_control_flow_and_non_atomic_lines(
         parse_spec(path)
 
     assert f"{path}:3:" in str(error.value)
+
+
+def test_guarded_drive_rejects_nonlocal_assignment(tmp_path: Path):
+    path = write_spec(
+        tmp_path,
+        "RestrictedSpec",
+        """
+        Def start():
+            Actions:
+                with GuardSpinLock(env.cv, self):
+                    self.value = drive("self", "_value")
+        """,
+    )
+    with pytest.raises(SpecError, match="can only assign to a local name") as error:
+        parse_spec(path)
+    assert f"{path}:4:" in str(error.value)
 
 
 @pytest.mark.parametrize(
@@ -363,20 +387,15 @@ def test_conditional_expressions_are_rejected_in_declarations_and_contracts(
     assert f"{path}:{line}:" in str(error.value)
 
 
-@pytest.mark.parametrize(
-    "assignment", ["result = 3", 'result = drive("self", "_value")']
-)
-def test_declared_output_leaves_guard_before_ensures(
-    root: SpecRoot, tmp_path: Path, assignment: str
-):
+def test_declared_output_leaves_guard_before_ensures(root: SpecRoot, tmp_path: Path):
     path = write_spec(
         tmp_path,
         "GuardOutputSpec",
-        f"""
+        """
         Def _check() -> result:
             Actions:
                 with GuardSpinLock(env.cv, self):
-                    {assignment}
+                    result = drive("self", "_value")
             Ensures:
                 env.cv.local_irq == 0 and env.cv.remote_tasks == 0
 

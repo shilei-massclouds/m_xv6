@@ -138,10 +138,11 @@ def test_action_points_follow_the_declaring_method_and_drive_completion_order(
         Def {action}():
             Actions:
                 self.value = 1
+                assert self.value == 1
                 with GuardSpinLock(env.cv, self):
-                    assert self.value == 1
                     drive("self", "observe")
-                    self.value = drive("self", "_value")
+                with GuardSpinLock(env.cv, self):
+                    drive("self", "_set_value")
                 pass
             Ensures:
                 self.value == 7 and env.cv.local_irq == 0
@@ -150,9 +151,9 @@ def test_action_points_follow_the_declaring_method_and_drive_completion_order(
             Actions:
                 self.value += 1
 
-        Def _value() -> result:
+        Def _set_value():
             Actions:
-                result = 7
+                self.value = 7
     """,
     )
     env = TaskLocalEnv(name="example")
@@ -171,9 +172,9 @@ def test_action_points_follow_the_declaring_method_and_drive_completion_order(
     else:
         operations = [
             "self.value = 1",
-            'drive("self", "observe")',
+            "with GuardSpinLock(env.cv, self):",
             "self.value += 1",
-            'self.value = drive("self", "_value")',
+            "with GuardSpinLock(env.cv, self):",
         ]
         input_positions = [0, 1, 1, 3]
         values = [0, 1, 2, 2, 7]
@@ -600,7 +601,7 @@ def test_wait_resume_preserves_depth_and_finishes_after_notification(
         assert saved.env.depth == 2
         assert saved.history.pending == {"example_0.0"}
         assert saved.history.output_position == 2 + attempt
-        assert [r["operation"]["kind"] for r in points()[-2:]] == ["drive", "break"]
+        assert [r["operation"]["kind"] for r in points()[-2:]] == ["with", "break"]
         assert all(stack == [None] for stack in saved.env.cv.stacks.values())
         assert root.worker.history == []
     assert initial_path.read_bytes() == initial_data
@@ -623,6 +624,34 @@ def test_wait_resume_preserves_depth_and_finishes_after_notification(
     (resumed_env,) = resumed_environments
     assert not resumed_env.signal_queues and resumed_env.depth == 0
     assert all(stack == [None] for stack in resumed_env.cv.stacks.values())
+
+
+def test_plain_break_defers_guarded_drive_output_until_resume(root, tmp_path):
+    cpu_model(
+        root,
+        tmp_path,
+        """
+        Def start():
+            Actions:
+                with GuardSmpAtomic(env.cv, self):
+                    drive("self", "_pause")
+        Def _pause():
+            Actions:
+                break(CpuFlowState.BUSYCHECK)
+                self.result = env.cv.remote_tasks
+        """,
+    )
+    path = start_with_break(root)
+    _, _, saved = read_snapshot(root, path, model_version=1)
+    assert isinstance(saved, Continuation)
+    assert saved.history.pending == {"example_0.0"}
+    assert saved.env.cv.remote_tasks == -1
+    assert snapshot_paths.branch_outputs("example", 0)[-1] == path
+
+    resume_checkpoint(root, path, 1)
+    restored, meta = output(2)
+    assert restored.worker.result == -1
+    assert meta.get("input_point") == "example_0.0"
 
 
 def test_resume_preserves_pending_emits_and_primary_return_value(root, tmp_path):
@@ -748,7 +777,9 @@ def test_labeled_break_rejects_a_restart_outside_the_stack(root, tmp_path):
     assert run.output_position == 1
 
 
-def test_resume_validates_file_model_and_specs_before_installing_gv(root, tmp_path):
+def test_resume_validates_file_model_and_specs_before_installing_gv(
+    root, tmp_path, monkeypatch
+):
     spec = cpu_model(
         root,
         tmp_path,
@@ -767,6 +798,19 @@ def test_resume_validates_file_model_and_specs_before_installing_gv(root, tmp_pa
     with pytest.raises(SnapshotFormatError, match="checksum"):
         resume_checkpoint(root, path, 1)
     path.write_bytes(content)
+
+    def read_old_checkpoint(*args, **kwargs):
+        meta, state, saved = read_snapshot(*args, **kwargs)
+        assert isinstance(saved, Continuation)
+        del saved.layout
+        return meta, state, saved
+
+    with monkeypatch.context() as patch:
+        patch.setattr("framework.interpreter.read_snapshot", read_old_checkpoint)
+        with pytest.raises(SnapshotCompatibilityError, match="instruction layout"):
+            resume_checkpoint(root, path, 1)
+    assert root.worker is previous
+
     spec.write_text(spec.read_text() + "\n# changed\n")
     with pytest.raises(SnapshotCompatibilityError, match="spec changed"):
         resume_checkpoint(root, path, 1)
@@ -875,7 +919,7 @@ def test_fork_both_entry_points_with_independent_candidate_gvs(
             )
             assert point["base"] == base
             assert point["input_snapshot"] == f"candidate/outputs/{path.name}"
-            assert point["operation"]["kind"] == "drive"
+            assert point["operation"]["kind"] == ("drive" if i == 0 else "with")
             assert point["location"]["method"] == ("start" if i == 0 else "wait")
     assert records[: len(baseline)] == baseline
     assert [path.read_bytes() for path in candidates] == original
@@ -923,6 +967,62 @@ def test_fork_reuses_prepared_signal_and_selected_contract(root, tmp_path):
     with pytest.raises(SnapshotCompatibilityError, match="incompatible type.*worker"):
         fork_input(root, "example_0.0", anchors["example_0.0"], incompatible, 1)
     assert points() == before
+
+
+def test_guarded_drive_forks_before_guards_and_saves_after_exit(
+    root, tmp_path, monkeypatch
+):
+    model(
+        root,
+        tmp_path,
+        """
+        Prop value: int = 3
+        Prop observed: int = 0
+        Def start():
+            Actions:
+                with GuardSmpAtomic(env.cv, self), GuardPreemption(env.cv):
+                    result = drive("self", "_read", value=self.value, level=env.cv.local_tasks)
+                self.observed += result
+        Def _read(value, level) -> result:
+            Requires:
+                level == -2 and env.cv.stacks["remote_tasks"][-1] is self
+            Actions:
+                self.observed = value
+                result = value + 1
+        """,
+    )
+    candidate = snapshot_paths.snapshot_path("candidate", 0)
+    candidate.parent.mkdir(parents=True)
+    root.worker.value = 9
+    save_snapshot(root, candidate, checkpoint=candidate.stem, model_version=1)
+    root.worker.value = 3
+    env = TaskLocalEnv("example")
+    anchors: dict[str, bytes] = {}
+    events: list[str] = []
+    original_save = flow_run.save_output_snapshot
+
+    def capture(point, frozen):
+        assert all(stack == [None] for stack in env.cv.stacks.values())
+        events.append("capture")
+        anchors[point] = frozen
+
+    def observe_save(root, path, **kwargs):
+        if path == snapshot_paths.snapshot_path("example", 1):
+            assert all(stack == [None] for stack in env.cv.stacks.values())
+            events.append("save")
+        return original_save(root, path, **kwargs)
+
+    monkeypatch.setattr(flow_run, "save_output_snapshot", observe_save)
+    with FlowRun(root, env, 1, capture_input=capture):
+        System().drive(env, "worker", "start")
+    assert events == ["capture", "save"]
+    assert root.worker.observed == 7
+    assert [p["operation"]["kind"] for p in points()] == ["with", "bare"]
+    assert output(1)[0].worker.observed == 3
+
+    fork_input(root, "example_0.0", anchors["example_0.0"], candidate, 1)
+    assert root.worker.observed == 19
+    assert output(0, branch=1)[0].worker.observed == 9
 
 
 def test_fork_keeps_prepared_argument_from_old_gv_container(root, tmp_path):

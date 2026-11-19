@@ -4,7 +4,7 @@ BP、AP 各自使用 `snapshots/<flow>/inputs/records.json` 保存 I 点，使�
 
 `<flow>_0.0.snap` 是初始 GV 的逻辑 O 点。每个分支独立编号，派生分支的首个 I 和实际生成的首个 O 均从 0 开始。O 元数据的可选 `input_point` 关联其来源 I，初始 O 没有来源。I 的 `input_snapshot` 指向最近一次保存的 O，路径相对于 snapshots 根目录。若其间执行了不设点的操作，这个 O 不包含那些操作造成的变化。
 
-设点针对 spec Actions 内的操作行。私有方法内的裸操作和 `drive` 行不设点，非私有方法按原规则设点。`emit` 入队和 `break` 暂停时仍产生各自的 I/O 点。方法边界、保护域声明、内部指令、assert 和 pass 不额外设点。
+设点针对 spec Actions 内的操作行。非私有方法的 `with` 和块内唯一的 `drive` 共用一对 I/O 点，分别在 Guard 进入前和退出后。私有方法内的裸操作、`drive` 和 `with` 不设点。`emit` 入队和 `break` 暂停时仍产生各自的 I/O 点；被 `break` 放弃的 `with` 不生成完成 O。方法边界、内部指令、assert 和 pass 不额外设点。
 
 独立 AP 在等待启动通知时以 `BUSYCHECK` 暂停，`ap_0.1.snap` 是第一个可恢复的 `break` O 点。此时旧的 `wait` 保护域已经退出，原始 `wait` Signal 与待完成的调用位置一并保存。主入口续跑时重新进入 `wait`，直到收到通知或再次到达同一处 `break`。可恢复快照采用格式 2，把 Env、Frame 和 Signal 队列与 GV 一起保存。普通 O 点采用格式 1，仅保存 GV。
 

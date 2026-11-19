@@ -29,7 +29,7 @@ spec 文件名是对象类型名。`Prop table: list[Proc]` 为每个实例创�
 - 执行所选组的 Actions，只检查该组的 Ensures；Ensures 块内表达式做 OR。条件结果必须是 bool。
 - Requires 无匹配或 Ensures 不成立时，使用现有 `ContractViolation`，报告 spec 文件、行号、方法和入口分支。
 
-Actions 支持赋值、属性/下标赋值、表达式语句、`assert`、`pass`、`with` 保护域，以及 `+=`、`-=`、`*=`。每个操作必须完整写在一个物理行中，不能用括号或反斜杠跨行，也不能在同一行通过分号串联多个操作。保护域声明同样占一个物理行，内部操作各自另起一行。表达式采用 Python 表达式求值，spec 与原 Python 模型一样是可信程序输入。
+Actions 支持赋值、属性/下标赋值、表达式语句、`assert`、`pass`、`with` 保护域，以及 `+=`、`-=`、`*=`。每个操作必须完整写在一个物理行中，不能用括号或反斜杠跨行，也不能在同一行通过分号串联多个操作。`with` 的头部占一行，可叠加多个 Guard；块内恰好一行 `drive(...)` 或 `局部变量 = drive(...)`。表达式采用 Python 表达式求值，spec 与原 Python 模型一样是可信程序输入。
 
 spec 禁止 `if/else` 语句和条件表达式，分支选择通过互斥的 Requires/Actions/Ensures 组表达。如果判断依赖前一个操作或 Signal 的结果，先完成公共前缀，再将结果作为参数交给带分支的方法；不能把这个判断提前到公共前缀执行之前。`CpuFlow.select_next`、`InitProcFlow.first_init` 和 `ProcTable.set_initproc` 是现有示例。
 
@@ -37,11 +37,11 @@ Signal 调用写成 `drive("target", "action", key=value)`，可直接调用或�
 
 `framework/spec.py` 解析定义并注册对象类型。`framework/interpreter.py` 用循环和显式 Frame 栈推进 Actions。Frame 保存 Signal、指令位置、局部变量、契约分支和保护域。每次 `drive` 的队列还携带未完成的调用位置和已产生的首个结果。框架支持 Python Signal 目标，可恢复的调用链由显式 spec Frame 组成。
 
-方法仍按 `acquire → Requires → Actions → Ensures → release` 执行。非私有方法的裸操作行执行前写 I，成功后保存 O；`drive` 形成 Signal 后写 I，在交付结果后保存 O。私有方法（名称以下划线开头）内的裸操作和 `drive` 行照常执行，但不设点。是否设点只看 Actions 行所属的方法；私有方法调用的非私有方法仍按常规设点。`emit` 维持独立的入队前后设点规则。I 按进入顺序、O 按完成顺序编号。失败操作不产生 O，已保存的内部输出保留。
+方法仍按 `acquire → Requires → Actions → Ensures → release` 执行。非私有方法的裸操作行执行前写 I，成功后保存 O；普通 `drive` 形成 Signal 后写 I，在交付结果后保存 O。`with` 和块内的 `drive` 共用一对 I/O 点，记在 `with` 行：进入 Guard 前写 I，`drive` 交付结果且全部 Guard 成功退出后保存 O。从该 I 点分叉时，先加载候选 GV，再建立 Guard 和计算 `drive` 参数。私有方法（名称以下划线开头）的裸操作、`drive` 和 `with` 不设点；被调的非私有方法仍按常规设点。`emit` 维持独立的入队前后设点规则。I 按进入顺序、O 按完成顺序编号。失败操作不产生普通 O，已保存的内部输出保留。
 
 `break(state)` 和 `break(state, target, action)` 都单独成行，先写 I，再设置所属 CpuFlow 实例的 `state`。按实例身份选择该 CpuFlow 最内层的活动 Frame，检查它已选分支的 Ensures。检查通过后写可恢复的 O 点并暂停。单参数形式保留当前调用栈，续跑从 `break` 后的下一条指令开始。
 
-带恢复入口的 `break` 选中栈上最近的匹配调用；`"self"` 指执行 `break` 的对象。解释器退出该调用及其后代的保护域，不把这些栈帧当作正常返回。断点 O 保存被选中调用的原始 Signal、待交付结果的调用位置，以及剩余栈和 Env。续跑用原实参重新进入该方法，重新检查 CV 和 Requires；已完成的 GV 变化不回滚。被放弃的内部 `drive` 保留 I 记录，没有对应的完成 O；原调用直到正常返回才完成。
+带恢复入口的 `break` 选中栈上最近的匹配调用；`"self"` 指执行 `break` 的对象。解释器退出该调用及其后代的保护域，不把这些栈帧当作正常返回。断点 O 保存被选中调用的原始 Signal、待交付结果的调用位置，以及剩余栈和 Env。续跑用原实参重新进入该方法，重新检查 CV 和 Requires；已完成的 GV 变化不回滚。被放弃的内部 `drive` 或 `with` 保留 I 记录，没有对应的完成 O；原调用直到正常返回才完成。
 
 AP 的 `_wait` 用 `break(CpuFlowState.BUSYCHECK, "self", "wait")` 退出 `wait` 的保护域。用其他 GV 分叉时，`break` 的 I 记录关联的是退出保护后的恢复入口。候选 GV 可在这里改变 `SmpStarted.signaled`；AP 的 `BUSYCHECK` 和待完成的 `wait` 调用会保留。续跑重新进入 `wait`，按当前通知值继续或再次暂停。
 
@@ -55,7 +55,7 @@ drive 输入描述来源模型、目标、方法和实参；裸操作描述来�
 
 需要设点的操作在执行前记录 I，O 保存成功后推进输出计数。主入口使用 `buffer_input_records()` 和 `deduplicate_outputs(pack_breaks=True)`。普通 O 正文按 SHA-256 跨 Flow 共用，逻辑名称和来源 I 各自保留。断点序列化后暂存在内存，同批次可直接恢复。退出时按 Flow 原子保存 `outputs/breaks.pack`，随后发布 `outputs/index.json` 和 `inputs/records.json`。异常退出也会导出已有记录，强制终止可能丢失尚未发布的数据。单独使用 `FlowRun` 默认逐点原子保存。
 
-格式 2 的 `break` O 点在同一个对象图中保存 GV、Env、保护域、Frame、Signal 队列和 I/O 位置。格式 1 为普通 GV 快照。断点包索引为每个逻辑 O 点记录正文偏移和长度，续写保留已发布检查点的偏移。框架内部的 `resume_checkpoint` 仍从原分支最新断点续写。加载会检查正文摘要、模型版本、spec 指纹和该分支的 I/O 历史。普通 GV 加载器可以读取两种格式及独立文件。
+格式 2 的 `break` O 点在同一个对象图中保存 GV、Env、保护域、Frame、Signal 队列和 I/O 位置。格式 1 为普通 GV 快照。断点包索引为每个逻辑 O 点记录正文偏移和长度，续写保留已发布检查点的偏移。框架内部的 `resume_checkpoint` 仍从原分支最新断点续写。加载会检查正文摘要、模型版本、解释器指令布局、spec 指纹和该分支的 I/O 历史。`with` 合并成一条指令前的旧断点需要重新生成才能续跑，普通 GV 加载器仍可提取其中的 GV。
 
 `FlowRun`、`resume_checkpoint` 和 `fork_input` 的 `capture_input` 回调默认暂存首个 I 点，设 `capture_all_inputs=True` 后暂存每个 I 点。若该 I 已形成 Signal，暂存包括已求值的实参。`fork_input` 为每份候选 GV 独立恢复目标线路的 Env、Frame、Signal 和保护域，并按 GV 属性路径重新绑定引用。只通过容器位置找到的对象随执行状态冻结，以免加载另一份 GV 时把已求值的参数换成同一下标的其他对象。候选缺少需重新绑定的成员或类型不匹配时报告错误。基准 I 点状态在当前进程内复用。
 

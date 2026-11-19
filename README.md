@@ -16,7 +16,7 @@ python3 main.py
 
 每次分叉替换整个 GV，保留目标线路的 Env、Signal、局部值和已选契约分支。遇到语法错误、契约失败或其他执行错误时立即中止，并报告触发错误的位置。当前 BP → AP 的 52 个分支均可推导；AP → BP 在把 `ap_0.0.snap` 应用于 `bp_0.11` 的 `select_next` 时，因为 AP 的初始 GV 无法提供该 I 点引用的 `gv.initproc`，以快照兼容性错误中止。
 
-I/O 点只由 spec 的 Actions 操作行触发。非私有方法中，裸操作执行前记录 I 点，成功后保存 O 点；`drive` 在 Signal 参数求值完成后记录 I 点，在队列处理完毕并交付结果后保存 O 点。名称以下划线开头的方法，其裸操作和 `drive` 行不设点；该 `drive` 调用的非私有方法仍按自己的 Actions 设点。`emit` 继续在入队前后设点；`break` 通过所属 CpuFlow 实例最内层活动契约的 Ensures 后保存可恢复的 O 点。
+I/O 点只由 spec 的 Actions 操作行触发。非私有方法中，裸操作执行前记录 I 点，成功后保存 O 点；普通 `drive` 在 Signal 参数求值后记录 I 点，在队列处理完毕并交付结果后保存 O 点。`with` 只包住一行 `drive`（可赋给局部变量），整块共用一对 I/O 点：进 Guard 前记 I，退 Guard 后记 O。私有方法的裸操作、`drive` 和 `with` 不设点；被调的非私有方法仍按自己的 Actions 设点。`emit` 继续在入队前后设点；`break` 通过所属 CpuFlow 实例最内层活动契约的 Ensures 后保存可恢复的 O 点。
 
 方法边界、Requires/Ensures、保护域声明、解释器内部指令、`assert` 和 `pass` 不额外设点。每行裸操作是一个原子操作；Actions 中显式调用同步原语也属于裸操作。普通 Python Signal 调度仍保留，但不自动生成 spec I/O 点。
 

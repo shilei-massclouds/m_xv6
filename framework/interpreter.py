@@ -31,6 +31,8 @@ from framework.spec import (
     SpecSystem,
 )
 
+_CONTINUATION_LAYOUT = 1
+
 
 @dataclass
 class Frame:
@@ -90,6 +92,9 @@ class ExecutionState:
 @dataclass
 class Continuation(ExecutionState):
     history: RunPosition
+    # Guarded drives occupy one instruction, so older program counters cannot
+    # be used to resume a checkpoint, even with unchanged spec text.
+    layout: int = field(default_factory=lambda: _CONTINUATION_LAYOUT, kw_only=True)
 
 
 @dataclass
@@ -311,44 +316,41 @@ class Interpreter:
             case _:
                 raise SpecError(f"unsupported statement {type(node).__name__}")
 
-    def _step(self, frame: Frame, instruction):
-        node = instruction.node
+    def _step(self, frame: Frame, instruction: Instruction) -> None:
         match instruction.operation:
-            case "enter":
-                guard = self._eval(frame, node)
-                guard.__enter__()
-                frame.guards.append(guard)
-            case "leave":
-                frame.guards.pop().__exit__(None, None, None)
             case "statement" | "break":
                 if instruction.site is None:
-                    self._statement(frame, node)
+                    self._statement(frame, instruction.node)
                 else:
                     self._action(frame, instruction, None)
+            case "guarded_drive":
+                self._action(frame, instruction, None)
             case "drive" | "emit":
-                call = node.value
-                assert isinstance(call, ast.Call)
-                operation = instruction.operation
-                args = [self._eval(frame, arg) for arg in call.args]
-                if len(args) != 2:
-                    raise SpecError(f"{operation} expects target and action")
-                kwargs = {}
-                for keyword in call.keywords:
-                    value = self._eval(frame, keyword.value)
-                    if keyword.arg is None:
-                        kwargs.update(value)
-                    else:
-                        kwargs[keyword.arg] = value
-                target, action = args
-                if not isinstance(target, str) or not isinstance(action, str):
-                    raise SpecError("Signal target and action must be strings")
-                queue = frame.signal.queue if operation == "emit" else deque()
-                signal = Signal(
-                    frame.system, target, action, kwargs, frame.signal.env, queue
+                self._action(
+                    frame, instruction, self._prepare_signal(frame, instruction)
                 )
-                self._action(frame, instruction, signal)
             case _:
                 raise SpecError(f"unknown instruction {instruction.operation}")
+
+    def _prepare_signal(self, frame: Frame, instruction: Instruction) -> Signal:
+        call = instruction.node.value
+        assert isinstance(call, ast.Call)
+        operation = "emit" if instruction.operation == "emit" else "drive"
+        args = [self._eval(frame, arg) for arg in call.args]
+        if len(args) != 2:
+            raise SpecError(f"{operation} expects target and action")
+        kwargs = {}
+        for keyword in call.keywords:
+            value = self._eval(frame, keyword.value)
+            if keyword.arg is None:
+                kwargs.update(value)
+            else:
+                kwargs[keyword.arg] = value
+        target, action = args
+        if not isinstance(target, str) or not isinstance(action, str):
+            raise SpecError("Signal target and action must be strings")
+        queue = frame.signal.queue if operation == "emit" else deque()
+        return Signal(frame.system, target, action, kwargs, frame.signal.env, queue)
 
     def _record_input(
         self,
@@ -381,7 +383,7 @@ class Interpreter:
             frame.method.name,
             frame.branch_index,
             instruction.site,
-            "bare" if operation == "statement" else operation,
+            {"statement": "bare", "guarded_drive": "with"}.get(operation, operation),
             values,
         )
 
@@ -419,11 +421,19 @@ class Interpreter:
         run = require_run(env)
         point = None
         if not (
-            frame.method.name.startswith("_") and operation in {"statement", "drive"}
+            frame.method.name.startswith("_")
+            and operation in {"statement", "drive", "guarded_drive"}
         ):
             point = self._record_input(run, frame, instruction, signal)
             if operation != "break" or len(instruction.node.value.args) == 1:
                 self._capture_input(run, point, signal)
+
+        if operation == "guarded_drive":
+            for expression in instruction.guards:
+                guard = self._eval(frame, expression)
+                guard.__enter__()
+                frame.guards.append(guard)
+            signal = self._prepare_signal(frame, instruction)
 
         if signal is None:
             node = instruction.node
@@ -465,26 +475,19 @@ class Interpreter:
         env.signal_queues.pop()
         env.depth -= 1
 
-    @staticmethod
-    def _drive_receiver(parent: Frame) -> ast.AST | None:
-        assert parent.branch is not None
-        instruction = parent.branch.instructions[parent.position - 1]
-        assert instruction.operation == "drive"
-        return (
-            instruction.node.targets[0]
-            if isinstance(instruction.node, ast.Assign)
-            else None
-        )
-
     def _finish_drive(self, run: FlowRun, drive: Drive) -> None:
         assert not drive.first
         self.drives.pop()
         if self.drives:
             self._close_drive(run.env, drive)
             parent = self.frames[-1]
-            receiver = self._drive_receiver(parent)
-            if receiver is not None:
-                self._assign(parent, receiver, drive.result)
+            assert parent.branch is not None
+            instruction = parent.branch.instructions[parent.position - 1]
+            assert instruction.operation in {"drive", "guarded_drive"}
+            if isinstance(instruction.node, ast.Assign):
+                self._assign(parent, instruction.node.targets[0], drive.result)
+            for _ in instruction.guards:
+                parent.guards.pop().__exit__(None, None, None)
             if drive.caller_point is not None:
                 run.complete(drive.caller_point)
 
@@ -590,6 +593,13 @@ class Interpreter:
         raise FlowPaused(point, state, path, (frame.specification.path, line))
 
     def _restore(self, saved: Continuation | InputState, state: dict[str, Any]) -> None:
+        if (
+            isinstance(saved, Continuation)
+            and getattr(saved, "layout", None) != _CONTINUATION_LAYOUT
+        ):
+            raise SnapshotCompatibilityError(
+                "incompatible continuation instruction layout; regenerate checkpoints"
+            )
         env = saved.env
         restart = saved.restart
         if (
@@ -675,15 +685,18 @@ class Interpreter:
                 )
             instruction = branch.instructions[item.position - 1]
             if len(self.frames) < len(saved.drives) - 1:
-                valid = instruction.operation == "drive"
+                valid = instruction.operation in {"drive", "guarded_drive"}
+                expected_guards = len(instruction.guards)
             elif isinstance(saved, Continuation):
                 valid = instruction.operation == "break"
+                expected_guards = 0
             else:
                 valid = instruction.site is not None and (
                     (instruction.operation in {"drive", "emit"})
                     == (saved.signal is not None)
                 )
-            if not valid:
+                expected_guards = 0
+            if not valid or len(item.guards) != expected_guards:
                 raise SnapshotCompatibilityError(
                     "invalid continuation instruction position"
                 )

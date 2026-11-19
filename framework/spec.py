@@ -40,6 +40,7 @@ class Instruction:
     operation: str
     node: Any = None
     site: ActionSite | None = None
+    guards: tuple[ast.expr, ...] = ()
 
 
 @dataclass
@@ -158,10 +159,32 @@ def _compile_actions(
                             f"{filename}:{node.lineno}: a protection declaration must occupy a single physical line"
                         )
                     _reject_nested_operation(item.context_expr, filename)
-                    instructions.append(Instruction("enter", item.context_expr))
+                if node.body[0].lineno == node.lineno:
+                    raise SpecError(
+                        f"{filename}:{node.lineno}: only one operation per physical line is allowed"
+                    )
+                body = node.body[0]
+                if (
+                    len(node.body) != 1
+                    or not isinstance(body, (ast.Expr, ast.Assign))
+                    or _action_call(body.value) != "drive"
+                ):
+                    raise SpecError(
+                        f"{filename}:{node.lineno}: with requires exactly one drive"
+                    )
+                if isinstance(body, ast.Assign) and (
+                    len(body.targets) != 1 or not isinstance(body.targets[0], ast.Name)
+                ):
+                    raise SpecError(
+                        f"{filename}:{body.lineno}: a guarded drive can only assign to a local name"
+                    )
                 compile_block(node.body)
-                for _ in node.items:
-                    instructions.append(Instruction("leave"))
+                instructions[-1] = Instruction(
+                    "guarded_drive",
+                    body,
+                    site,
+                    tuple(item.context_expr for item in node.items),
+                )
             elif isinstance(node, (ast.Expr, ast.Assign)):
                 value = node.value
                 operation = _action_call(value)
